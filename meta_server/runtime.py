@@ -40,6 +40,8 @@ class RuntimeState:
 
     def __init__(self, state_path: Path = RUNTIME_STATE_PATH):
         self.state_path = state_path
+        mode = str(os.environ.get("BAD_PI_SCIENCE_MODE", "popper") or "popper").strip().lower()
+        self.science_mode = mode if mode in {"popper", "lakatos", "hybrid"} else "popper"
         self.registry: HypothesisRegistry = HypothesisRegistry()
         self.programme_registry = ProgrammeRegistry()
         self.population_manager = PopulationManager()
@@ -70,9 +72,10 @@ class RuntimeState:
             if not self.registry.active and not self.registry.archived:
                 self.registry = make_default_registry()
 
-            # Lakatos layer bootstrap/sync (additive; does not replace hypothesis math).
-            self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
-            self.programme_registry.classify_programmes()
+            # Lakatos layer bootstrap/sync (mode-gated).
+            if self.science_mode in {"lakatos", "hybrid"}:
+                self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
+                self.programme_registry.classify_programmes()
             self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
 
     def build_belief_state(self):
@@ -320,10 +323,11 @@ class RuntimeState:
             self.registry.evaluate_validation_tests(experiments)
 
             # Lakatos layer update: map hypothesis outcomes to programme events.
-            self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
-            for h in self.registry.active:
-                self.programme_registry.record_hypothesis_event(h)
-            self.programme_registry.classify_programmes()
+            if self.science_mode in {"lakatos", "hybrid"}:
+                self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
+                for h in self.registry.active:
+                    self.programme_registry.record_hypothesis_event(h)
+                self.programme_registry.classify_programmes()
 
             belief_engine.on_experiment_complete(experiments, dimensions, self.registry.active)
 
@@ -372,8 +376,9 @@ class RuntimeState:
             accepted = [d["proposal"] for d in decisions if d["engine_gate"].get("accepted")]
             if accepted:
                 self.pending_new_hypotheses.extend(accepted)
-                self.programme_registry.sync_from_hypotheses(self.registry.active, store.get_dimensions())
-                self.programme_registry.classify_programmes()
+                if self.science_mode in {"lakatos", "hybrid"}:
+                    self.programme_registry.sync_from_hypotheses(self.registry.active, store.get_dimensions())
+                    self.programme_registry.classify_programmes()
                 self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
 
             # Stall detection: ask LLM for new dimensions beyond the current search space

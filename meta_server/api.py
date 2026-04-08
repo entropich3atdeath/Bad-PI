@@ -485,10 +485,25 @@ def theory_graph():
     return runtime_state.registry.theory_graph()
 
 
+@app.get("/science_mode")
+def science_mode():
+    """Returns active scientific reasoning mode for this server instance."""
+    return {
+        "science_mode": runtime_state.science_mode,
+        "available_modes": ["popper", "lakatos", "hybrid"],
+        "notes": {
+            "popper": "Hypothesis-centric falsification and archival behaviour.",
+            "lakatos": "Programme-centric anomaly absorption and protective-belt tracking.",
+            "hybrid": "Runs Popper hypothesis mechanics with Lakatos programme analytics in parallel.",
+        },
+    }
+
+
 @app.get("/programmes")
 def programmes():
     """Lakatosian research-programme health snapshot (additive to theory graph)."""
     return {
+        "science_mode": runtime_state.science_mode,
         "count": len(runtime_state.programme_registry.active),
         "programmes": runtime_state.programme_registry.rivalry_snapshot(),
     }
@@ -499,6 +514,7 @@ def programme_belt_modifications():
     """Pending protective-belt modification suggestions from anomaly handling."""
     pending = runtime_state.programme_registry.pending_belt_modifications
     return {
+        "science_mode": runtime_state.science_mode,
         "count": len(pending),
         "items": pending,
     }

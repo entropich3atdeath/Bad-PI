@@ -268,6 +268,7 @@ meta_server/
 Configurable via environment:
 ```
 META_RUNTIME_STATE_PATH=/data/runtime_state.json  # default: meta_server/runtime_state.json
+BAD_PI_SCIENCE_MODE=popper                # popper | lakatos | hybrid
 ```
 
 Each hypothesis now also tracks an effect-size Gaussian summary (`effect_mu`, `effect_sem`) alongside Beta-Binomial evidence.
@@ -280,6 +281,7 @@ Inspect parent/child and linked hypothesis structure:
 
 - `GET /theory_graph` → `{ "nodes": [...], "edges": [...] }`
 - `GET /theory_graph/human` → human-readable derived summary layer
+- `GET /science_mode` → active reasoning mode + available modes
 - `GET /programmes` → Lakatosian programme health snapshot
 - `GET /programmes/belt_modifications` → pending protective-belt modification suggestions
 
@@ -440,6 +442,7 @@ If a deployed prediction is later wrong, a flush is issued and the confidence ba
 Server env vars:
 
 ```bash
+BAD_PI_SCIENCE_MODE=popper
 BAD_PI_SPEC_EXEC_ENABLED=1
 BAD_PI_SPEC_AUTO_DEPLOY=1
 BAD_PI_SPEC_CONF_THRESHOLD=0.65

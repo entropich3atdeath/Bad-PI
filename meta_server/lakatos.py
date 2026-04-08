@@ -165,6 +165,7 @@ class ProgrammeRegistry:
         self._archived: dict[str, ResearchProgramme] = {}
         self._hypothesis_to_programme: dict[str, str] = {}
         self._pending_belt_modifications: list[dict] = []
+        self._last_hypothesis_status: dict[str, str] = {}
 
     @property
     def active(self) -> list[ResearchProgramme]:
@@ -252,6 +253,11 @@ class ProgrammeRegistry:
         status = str(getattr(hypothesis, "status", "active"))
         statement = str(getattr(hypothesis, "statement", ""))
 
+        previous_status = self._last_hypothesis_status.get(hid)
+        self._last_hypothesis_status[hid] = status
+        if previous_status == status:
+            return
+
         if status == "refuted":
             programme.register_anomaly()
             self._pending_belt_modifications.append({
@@ -299,6 +305,7 @@ class ProgrammeRegistry:
             "archived": {pid: p.to_dict() for pid, p in self._archived.items()},
             "hypothesis_to_programme": dict(self._hypothesis_to_programme),
             "pending_belt_modifications": list(self._pending_belt_modifications),
+            "last_hypothesis_status": dict(self._last_hypothesis_status),
         }
 
     @classmethod
@@ -314,4 +321,5 @@ class ProgrammeRegistry:
         }
         reg._hypothesis_to_programme = dict(data.get("hypothesis_to_programme", {}))
         reg._pending_belt_modifications = list(data.get("pending_belt_modifications", []))
+        reg._last_hypothesis_status = dict(data.get("last_hypothesis_status", {}))
         return reg
