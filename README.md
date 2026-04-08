@@ -266,10 +266,13 @@ Each hypothesis now also tracks an effect-size Gaussian summary (`effect_mu`, `e
 Inspect parent/child and linked hypothesis structure:
 
 - `GET /theory_graph` → `{ "nodes": [...], "edges": [...] }`
+- `GET /theory_graph/human` → human-readable derived summary layer
 
 Edge types:
 - `decomposes_into` (parent → child)
 - `linked` (related hypotheses)
+
+The graph JSON is the source of truth. The `/theory_graph/human` response is explicitly derived (`derived_not_authoritative=true`) and can use LLM translation with deterministic fallback.
 
 ---
 
