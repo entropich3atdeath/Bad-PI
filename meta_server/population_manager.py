@@ -13,7 +13,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any
 
 from .hypotheses import Hypothesis, HypothesisRegistry
 
@@ -118,12 +118,21 @@ class PopulationManager:
         total_workers: int,
         top_configs: list[dict],
         dimensions: list[dict],
+        programme_registry: Optional[Any] = None,
+        science_mode: str = "popper",
     ) -> list[str]:
         """
         Reconcile populations with the current registry.
         Returns a list of human-readable change descriptions for the meta-log.
         """
         allocations = registry.allocate_workers(total_workers)
+        if science_mode in {"lakatos", "hybrid"} and programme_registry is not None:
+            allocations = self._apply_programme_pressure(
+                allocations=allocations,
+                registry=registry,
+                total_workers=total_workers,
+                programme_registry=programme_registry,
+            )
         active_h_ids = {h.id for h in registry.active}
         existing_h_ids = {p.hypothesis_id for p in self.active_populations}
         changes = []
@@ -182,6 +191,98 @@ class PopulationManager:
             self.assign_worker(w)
 
         return changes
+
+    def _apply_programme_pressure(
+        self,
+        allocations: dict[str, int],
+        registry: HypothesisRegistry,
+        total_workers: int,
+        programme_registry: Any,
+    ) -> dict[str, int]:
+        """
+        Reweight hypothesis allocations by programme health pressure.
+
+        - Keeps existing hypothesis populations intact (no removals here).
+        - Preserves per-hypothesis MIN_WORKERS floor.
+        - Applies pressure only to the discretionary worker pool above minimum.
+        """
+        hs = registry.active
+        if len(hs) <= 1 or not allocations:
+            return allocations
+
+        min_w = int(getattr(registry, "MIN_WORKERS", 1))
+        n = len(hs)
+        base_floor = {h.id: min_w for h in hs}
+        discretionary_total = max(0, int(total_workers) - n * min_w)
+
+        # If we don't have any discretionary workers, nothing to pressure.
+        if discretionary_total <= 0:
+            return allocations
+
+        def _programme_multiplier(h_id: str) -> float:
+            programme = programme_registry.programme_for_hypothesis(h_id)
+            if not programme:
+                return 1.0
+
+            ratio = float(getattr(programme, "progressiveness_ratio", 0.5))
+            status = str(getattr(programme, "status", "progressive"))
+
+            # Rival pressure: degenerative programmes lose workers when a stronger
+            # progressive rival exists with higher progressiveness ratio.
+            best_progressive = 0.0
+            for p in getattr(programme_registry, "active", []):
+                if str(getattr(p, "status", "")) == "progressive":
+                    best_progressive = max(best_progressive, float(getattr(p, "progressiveness_ratio", 0.0)))
+
+            if status == "progressive":
+                # 1.00 → 1.60 as ratio moves 0.5 → 1.0
+                return 1.0 + max(0.0, ratio - 0.5) * 1.2
+
+            if status == "degenerative":
+                gap = max(0.0, best_progressive - ratio)
+                # Base penalty + rival pressure penalty
+                # Keeps some exploration budget while shifting mass away.
+                return max(0.35, 0.75 - 0.7 * gap)
+
+            return 1.0
+
+        weighted = {}
+        for h in hs:
+            base_extra = max(0, int(allocations.get(h.id, min_w)) - min_w)
+            mult = _programme_multiplier(h.id)
+            weighted[h.id] = max(0.0, float(base_extra) * mult)
+
+        total_weight = sum(weighted.values())
+        if total_weight <= 1e-12:
+            return allocations
+
+        raw_extra = {
+            h.id: (weighted[h.id] / total_weight) * discretionary_total
+            for h in hs
+        }
+        extra_counts = {hid: int(v) for hid, v in raw_extra.items()}
+        remainder = discretionary_total - sum(extra_counts.values())
+        if remainder > 0:
+            frac = sorted(
+                ((hid, raw_extra[hid] - extra_counts[hid]) for hid in raw_extra),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            for hid, _ in frac[:remainder]:
+                extra_counts[hid] += 1
+
+        pressured = {
+            hid: base_floor.get(hid, min_w) + extra_counts.get(hid, 0)
+            for hid in allocations.keys()
+        }
+
+        # Exact worker conservation guard.
+        drift = int(total_workers) - sum(pressured.values())
+        if drift != 0 and pressured:
+            top_h = max(pressured, key=pressured.get)
+            pressured[top_h] += drift
+
+        return pressured
 
     # ── Program.md generation ─────────────────────────────────────────────
 

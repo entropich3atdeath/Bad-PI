@@ -223,6 +223,8 @@ Bad PI now includes an additive `ProgrammeRegistry` layer (`meta_server/lakatos.
 - `ResearchProgramme` = hard core + protective belt (linked hypothesis IDs)
 - Refuted auxiliaries are treated as anomalies and queued as pending belt modifications
 - Programme health is tracked by a progressiveness ratio over resolved novel predictions
+- In `lakatos`/`hybrid` mode, worker allocation applies programme-level pressure:
+  progressive programmes receive more discretionary workers, degenerative programmes are down-weighted
 - Existing mechanics (Beta-Binomial, test_spec, populations, worker protocol) are unchanged
 
 ### What workers see in `next_config` (population-aware)

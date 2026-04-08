@@ -464,6 +464,8 @@ class RuntimeState:
             total_workers=total_workers,
             top_configs=self._top_configs_locked(5),
             dimensions=store.get_dimensions(),
+            programme_registry=self.programme_registry,
+            science_mode=self.science_mode,
         )
         self._save_locked()
         return changes
