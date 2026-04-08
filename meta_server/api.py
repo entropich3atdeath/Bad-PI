@@ -479,6 +479,12 @@ def get_meta_log():
     return runtime_state.meta_log.latest_markdown()
 
 
+@app.get("/theory_graph")
+def theory_graph():
+    """Structured parent/child/link hypothesis graph for analysis tooling."""
+    return runtime_state.registry.theory_graph()
+
+
 @app.get("/dimension_proposals")
 def get_dimension_proposals():
     """

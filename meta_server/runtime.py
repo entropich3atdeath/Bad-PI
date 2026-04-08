@@ -130,11 +130,10 @@ class RuntimeState:
             dimensions = store.get_dimensions()
             belief_engine.on_experiment_complete(experiments, dimensions, self.registry.active)
 
-        # Track improvement trend for stall detection
-        top1 = self._top_configs_locked(1)
-        if top1 and top1[0].get("delta_bpb") is not None:
-            belief_engine.record_best_delta(total_experiments, float(top1[0]["delta_bpb"]))
-
+            # Track improvement trend for stall detection
+            top1 = self._top_configs_locked(1)
+            if top1 and top1[0].get("delta_bpb") is not None:
+                belief_engine.record_best_delta(total_experiments, float(top1[0]["delta_bpb"]))
 
             eliminated = self._archive_refuted_locked()
             population_changes = self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))

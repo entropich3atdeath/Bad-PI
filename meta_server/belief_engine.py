@@ -915,6 +915,7 @@ class BeliefEngine:
             "investigate": 300,   # 5 min  — standard
             "moonshot":    240,   # 4 min  — fail fast on speculative ideas
             "converge":    540,   # 9 min  — multi-worker validation of the winning config
+            "decision_sprint": 510,  # 8.5 min — force decisive evidence for uncertain claims
         }
         budget = budgets.get(population_strategy, BASE)
 
@@ -973,7 +974,7 @@ class BeliefEngine:
 
         sorted_hyps = sorted(
             hypotheses,
-            key=lambda h: 4 * h.posterior * (1 - h.posterior) * h.importance,
+            key=lambda h: float(getattr(h, "information_value", 4 * h.posterior * (1 - h.posterior) * h.importance)),
             reverse=True,
         )
         hyp_dicts = [
@@ -983,9 +984,22 @@ class BeliefEngine:
                 **self.bbayes.posterior_stats(
                     int(h.alpha - 2), int(h.alpha + h.beta - 4)
                 ),
-                "info_value": round(4 * h.posterior * (1 - h.posterior) * h.importance, 3),
+                "info_value": round(float(getattr(h, "information_value", 4 * h.posterior * (1 - h.posterior) * h.importance)), 3),
                 "evidence_strength": getattr(h, "evidence_strength", "weak"),
                 "status": h.status,
+                "gaussian_support_probability": round(float(getattr(h, "gaussian_support_probability", 0.0)), 4),
+                "gaussian_refute_probability": round(float(getattr(h, "gaussian_refute_probability", 0.0)), 4),
+                "gaussian_rope_probability": round(float(getattr(h, "gaussian_rope_probability", 1.0)), 4),
+                "effect_mu": round(float(getattr(h, "effect_mu", 0.0)), 6),
+                "effect_sem": round(float(getattr(h, "effect_sem", 0.0)), 6),
+                "uncertain_streak": int(getattr(h, "uncertain_streak", 0)),
+                "decision_sprints_run": int(getattr(h, "decision_sprints_run", 0)),
+                "in_decision_sprint": bool(getattr(h, "in_decision_sprint", False)),
+                "allocation_penalty": round(float(getattr(h, "allocation_penalty", 1.0)), 3),
+                "parent_id": getattr(h, "parent_id", None),
+                "children_ids": list(getattr(h, "children_ids", [])),
+                "linked_ids": list(getattr(h, "linked_ids", [])),
+                "canonical_id": getattr(h, "canonical_id", None),
             }
             for h in sorted_hyps
         ]

@@ -131,7 +131,10 @@ class PopulationManager:
         # Spawn populations for new hypotheses
         for h in registry.active:
             if h.id not in existing_h_ids:
-                strategy = "falsify" if h.needs_falsification_run() else "investigate"
+                strategy = (
+                    "decision_sprint" if h.in_decision_sprint else
+                    ("falsify" if h.needs_falsification_run() else "investigate")
+                )
                 pop = Population(
                     hypothesis_id=h.id,
                     strategy=strategy,
@@ -157,6 +160,7 @@ class PopulationManager:
                 pop.target_workers = allocations.get(pop.hypothesis_id, 5)
                 # Update strategy
                 new_strategy = (
+                    "decision_sprint" if h.in_decision_sprint else
                     "falsify"  if h.needs_falsification_run()   else
                     "exploit"  if h.status == "supported"        else
                     "investigate"
@@ -223,6 +227,13 @@ class PopulationManager:
                 f"**Only vary** the dimension(s) directly relevant to: \"{hypothesis.statement}\"\n\n"
                 f"Run each variant at least 3 times to average out noise. "
                 f"Report WINDOW_PATTERN (or relevant key) alongside every val_bpb."
+            ),
+            "decision_sprint": (
+                f"**DECISION SPRINT (ETERNAL UNCERTAINTY CONTROL)**\n\n"
+                f"This hypothesis has remained near indecision for too long.\n"
+                f"Run controlled, decisive experiments to force a clear conclusion.\n\n"
+                f"Use focused sweeps around the key dimensions in this hypothesis.\n"
+                f"Repeat each arm at least 4 times and prioritize low-variance comparisons."
             ),
             "moonshot": (
                 f"**MOONSHOT EXPLORATION**\n\n"

@@ -31,6 +31,8 @@ information_value(H) = uncertainty(H) × importance(H)
 worker_allocation(H) ∝ softmax(information_value)
 ```
 
+To prevent "eternal uncertainty" hypotheses from consuming too much capacity, Bad PI applies an allocation penalty after long indecision streaks and triggers a focused **decision sprint** to force decisive evidence.
+
 For LLM-proposed hypotheses, allocation is intentionally ramped to avoid wasting resources on hallucinations:
 
 ```
@@ -119,7 +121,8 @@ The PI calls `propose_hypotheses` as a structured tool (`program_writer.py`), so
   "type":              "positive | comparative | interaction | null",
   "importance":        0.72,
   "rationale":         "1-sentence statistical reason based only on the data shown",
-  "config_constraint": {"DEPTH": 12}
+  "config_constraint": {"DEPTH": 12},
+  "parent_id":         "optional_parent_hypothesis_id"
 }
 ```
 
@@ -133,6 +136,7 @@ After schema validation, each proposal must pass:
 |---|---|
 | `schema_valid` | Pydantic parse succeeded (guaranteed by tool_use) |
 | `novel` | Statement text does not normalize-match any existing hypothesis |
+| `semantic_novel` | Statement must not be a near-duplicate by semantic similarity |
 | `importance_threshold` | `importance >= 0.15` — proposals below this are too vague to test |
 | `valid_constraint` | `config_constraint` must be a `dict` |
 
@@ -252,6 +256,20 @@ Configurable via environment:
 ```
 META_RUNTIME_STATE_PATH=/data/runtime_state.json  # default: meta_server/runtime_state.json
 ```
+
+Each hypothesis now also tracks an effect-size Gaussian summary (`effect_mu`, `effect_sem`) alongside Beta-Binomial evidence.
+
+---
+
+## Theory graph endpoint
+
+Inspect parent/child and linked hypothesis structure:
+
+- `GET /theory_graph` → `{ "nodes": [...], "edges": [...] }`
+
+Edge types:
+- `decomposes_into` (parent → child)
+- `linked` (related hypotheses)
 
 ---
 

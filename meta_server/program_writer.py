@@ -78,6 +78,7 @@ class HypothesisProposal(BaseModel):
     importance:        float = Field(ge=0.0, le=1.0, description="Expected impact if true, 0-1")
     rationale:         str   = Field(description="1-sentence statistical rationale based on the data provided")
     config_constraint: dict  = Field(default_factory=dict, description="Values to hold fixed for a controlled test. Empty dict = no constraint.")
+    parent_id:         Optional[str] = Field(default=None, description="Optional parent hypothesis id if this is a decomposition/refinement")
 
 
 class HypothesisProposalBatch(BaseModel):
@@ -263,6 +264,12 @@ def _build_math_context(bs: "BeliefState") -> str:
         f" support={h.get('support_probability', 0):.2f}"
         f" refute={h.get('refute_probability', 0):.2f}"
         f" rope={h.get('rope_probability', 0):.2f}"
+        f" g_support={h.get('gaussian_support_probability', 0):.2f}"
+        f" g_refute={h.get('gaussian_refute_probability', 0):.2f}"
+        f" effect_mu={h.get('effect_mu', 0):+.4f}"
+        f" effect_sem={h.get('effect_sem', 0):.4f}"
+        f" uncertain_streak={h.get('uncertain_streak', 0)}"
+        f" sprint={h.get('in_decision_sprint', False)}"
         f" n={h['n']}  \"{h['statement']}\""
         for h in bs.hypotheses[:6]
     ]
