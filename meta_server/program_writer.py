@@ -79,6 +79,8 @@ class HypothesisProposal(BaseModel):
     rationale:         str   = Field(description="1-sentence statistical rationale based on the data provided")
     config_constraint: dict  = Field(default_factory=dict, description="Values to hold fixed for a controlled test. Empty dict = no constraint.")
     parent_id:         Optional[str] = Field(default=None, description="Optional parent hypothesis id if this is a decomposition/refinement")
+    phase:             str   = Field(default="exploration", description="exploration | validation")
+    test_spec:         Optional[dict] = Field(default=None, description="Executable validation protocol. Required when phase=validation.")
 
 
 class HypothesisProposalBatch(BaseModel):
@@ -380,7 +382,11 @@ def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
             "role":    "user",
             "content": (
                 "Based on these experiment results, propose 1-3 new hypotheses to test.\n"
-                "Base proposals ONLY on patterns visible in the data below.\n\n"
+                "Base proposals ONLY on patterns visible in the data below.\n"
+                "If a hypothesis is mature enough, set phase=validation and include an executable test_spec.\n"
+                "Supported test_spec.type values: single_factor_effect, interaction_grid.\n"
+                "For single_factor_effect include {variable, values, min_runs_per_cell, decision_rule:{threshold}}.\n"
+                "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n\n"
                 f"{context}\n\n"
                 "Call propose_hypotheses with your proposals."
             ),

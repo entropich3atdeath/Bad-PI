@@ -38,8 +38,7 @@ from worker.patcher import apply_delta, restore_backup, read_current_config
 
 CFG_PATH = Path(__file__).parent / ".worker_config.json"
 TRACKED_KEYS = [
-    "DEPTH", "learning_rate", "TOTAL_BATCH_SIZE", "DEVICE_BATCH_SIZE",
-    "WINDOW_PATTERN", "head_dim", "weight_decay", "muon_lr",
+    "LR", "BATCH_SIZE", "HIDDEN_SIZE", "N_LAYERS", "WEIGHT_DECAY", "OPTIMIZER",
     "TOTAL_WALL_CLOCK_TIME",   # ← agent-controlled budget; must exist in train.py
 ]
 

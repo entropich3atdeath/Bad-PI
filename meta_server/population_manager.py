@@ -132,6 +132,7 @@ class PopulationManager:
         for h in registry.active:
             if h.id not in existing_h_ids:
                 strategy = (
+                    "validate" if h.phase == "validation" else
                     "decision_sprint" if h.in_decision_sprint else
                     ("falsify" if h.needs_falsification_run() else "investigate")
                 )
@@ -160,6 +161,7 @@ class PopulationManager:
                 pop.target_workers = allocations.get(pop.hypothesis_id, 5)
                 # Update strategy
                 new_strategy = (
+                    "validate" if h.phase == "validation" else
                     "decision_sprint" if h.in_decision_sprint else
                     "falsify"  if h.needs_falsification_run()   else
                     "exploit"  if h.status == "supported"        else
@@ -234,6 +236,12 @@ class PopulationManager:
                 f"Run controlled, decisive experiments to force a clear conclusion.\n\n"
                 f"Use focused sweeps around the key dimensions in this hypothesis.\n"
                 f"Repeat each arm at least 4 times and prioritize low-variance comparisons."
+            ),
+            "validate": (
+                f"**VALIDATION PROTOCOL EXECUTION**\n\n"
+                f"This hypothesis is in validation mode.\n"
+                f"Run only queued test cells/arms and do not improvise outside the protocol.\n\n"
+                f"Prioritize completion of under-sampled cells to reach minimum repeats."
             ),
             "moonshot": (
                 f"**MOONSHOT EXPLORATION**\n\n"

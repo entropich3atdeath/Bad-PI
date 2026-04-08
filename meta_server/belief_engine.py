@@ -916,6 +916,7 @@ class BeliefEngine:
             "moonshot":    240,   # 4 min  — fail fast on speculative ideas
             "converge":    540,   # 9 min  — multi-worker validation of the winning config
             "decision_sprint": 510,  # 8.5 min — force decisive evidence for uncertain claims
+            "validate":    480,   # 8 min — protocol-driven validation trials
         }
         budget = budgets.get(population_strategy, BASE)
 
@@ -987,6 +988,8 @@ class BeliefEngine:
                 "info_value": round(float(getattr(h, "information_value", 4 * h.posterior * (1 - h.posterior) * h.importance)), 3),
                 "evidence_strength": getattr(h, "evidence_strength", "weak"),
                 "status": h.status,
+                "phase": getattr(h, "phase", "exploration"),
+                "validation_completed": bool(getattr(h, "validation_completed", False)),
                 "gaussian_support_probability": round(float(getattr(h, "gaussian_support_probability", 0.0)), 4),
                 "gaussian_refute_probability": round(float(getattr(h, "gaussian_refute_probability", 0.0)), 4),
                 "gaussian_rope_probability": round(float(getattr(h, "gaussian_rope_probability", 1.0)), 4),
