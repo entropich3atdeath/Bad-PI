@@ -123,6 +123,13 @@ class ThompsonSampler:
 
         for dim in active_dims:
             name = dim["name"]
+
+            # Canary dimensions are sampled on only a small share of configs.
+            if bool(dim.get("is_canary")):
+                p = float(dim.get("canary_prob", 0.12) or 0.12)
+                if rng.random() > max(0.0, min(1.0, p)):
+                    continue
+
             buckets = self._data.get(name, {})
 
             if not buckets:

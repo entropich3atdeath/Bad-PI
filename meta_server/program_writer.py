@@ -78,6 +78,9 @@ class HypothesisProposal(BaseModel):
     importance:        float = Field(ge=0.0, le=1.0, description="Expected impact if true, 0-1")
     rationale:         str   = Field(description="1-sentence statistical rationale based on the data provided")
     config_constraint: dict  = Field(default_factory=dict, description="Values to hold fixed for a controlled test. Empty dict = no constraint.")
+    parent_id:         Optional[str] = Field(default=None, description="Optional parent hypothesis id if this is a decomposition/refinement")
+    phase:             str   = Field(default="exploration", description="exploration | validation")
+    test_spec:         dict = Field(description="Executable test protocol (required). Defines how to falsify the claim via controlled experiment.")
 
 
 class HypothesisProposalBatch(BaseModel):
@@ -102,6 +105,14 @@ class DimensionProposal(BaseModel):
 
 class DimensionProposalBatch(BaseModel):
     proposals: list[DimensionProposal] = Field(description="1-3 new dimensions to explore", max_length=3)
+
+
+class TheoryGraphSummaryOutput(BaseModel):
+    """Human-readable summary layer derived from /theory_graph JSON."""
+    overview: str = Field(description="1-2 sentence plain-English summary of current theory state")
+    key_points: list[str] = Field(description="3-6 concise bullets highlighting strongest supported/refuted/active relationships", min_length=1)
+    next_actions: list[str] = Field(description="1-4 concrete follow-up experiment actions", min_length=1)
+    caution: Optional[str] = Field(default=None, description="Optional caveat about uncertainty or sparse evidence")
 
 
 # ── Tool definitions (Anthropic tool_use schema) ──────────────────────────────
@@ -135,6 +146,15 @@ DIMENSION_TOOL = {
         "Base proposals only on the stall pattern and current best results."
     ),
     "input_schema": DimensionProposalBatch.model_json_schema(),
+}
+
+THEORY_GRAPH_TOOL = {
+    "name": "summarize_theory_graph",
+    "description": (
+        "Translate a structured hypothesis graph into concise plain English. "
+        "Do not invent evidence; only summarize what appears in the graph."
+    ),
+    "input_schema": TheoryGraphSummaryOutput.model_json_schema(),
 }
 
 
@@ -228,6 +248,29 @@ def propose_new_dimensions(bs: "BeliefState", existing_dim_names: list[str]) -> 
         return []
 
 
+def summarize_theory_graph(graph: dict) -> dict:
+    """
+    Human-readable layer for theory graph JSON.
+    Returns a derived narrative and metadata while keeping graph JSON authoritative.
+    """
+    try:
+        out = _call_theory_graph_tool(graph)
+        return {
+            "mode": "llm",
+            "derived_not_authoritative": True,
+            "summary_text": _render_theory_graph_summary(out),
+            "structured": out.model_dump(),
+        }
+    except Exception as e:
+        log.warning(f"theory graph summary failed ({type(e).__name__}: {e}) — using template")
+        return {
+            "mode": "template",
+            "derived_not_authoritative": True,
+            "summary_text": _template_theory_graph_summary(graph),
+            "structured": None,
+        }
+
+
 # ── LLM calls ─────────────────────────────────────────────────────────────────
 
 def _build_math_context(bs: "BeliefState") -> str:
@@ -263,6 +306,12 @@ def _build_math_context(bs: "BeliefState") -> str:
         f" support={h.get('support_probability', 0):.2f}"
         f" refute={h.get('refute_probability', 0):.2f}"
         f" rope={h.get('rope_probability', 0):.2f}"
+        f" g_support={h.get('gaussian_support_probability', 0):.2f}"
+        f" g_refute={h.get('gaussian_refute_probability', 0):.2f}"
+        f" effect_mu={h.get('effect_mu', 0):+.4f}"
+        f" effect_sem={h.get('effect_sem', 0):.4f}"
+        f" uncertain_streak={h.get('uncertain_streak', 0)}"
+        f" sprint={h.get('in_decision_sprint', False)}"
         f" n={h['n']}  \"{h['statement']}\""
         for h in bs.hypotheses[:6]
     ]
@@ -333,7 +382,13 @@ def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
             "role":    "user",
             "content": (
                 "Based on these experiment results, propose 1-3 new hypotheses to test.\n"
-                "Base proposals ONLY on patterns visible in the data below.\n\n"
+                "Base proposals ONLY on patterns visible in the data below.\n"
+                "IMPORTANT: Every hypothesis MUST include a test_spec — it defines how to falsify your claim.\n"
+                "phase=exploration: early-stage hypothesis, test_spec guides signal collection.\n"
+                "phase=validation: mature hypothesis, test_spec is strict experimental protocol.\n"
+                "Supported test_spec.type values: single_factor_effect, interaction_grid.\n"
+                "For single_factor_effect include {variable, values, min_runs_per_cell, decision_rule:{threshold}}.\n"
+                "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n\n"
                 f"{context}\n\n"
                 "Call propose_hypotheses with your proposals."
             ),
@@ -372,6 +427,81 @@ def _call_dimension_tool(bs: "BeliefState", existing_dim_names: list[str]) -> li
     tool_block = next(b for b in response.content if b.type == "tool_use")
     batch      = DimensionProposalBatch.model_validate(tool_block.input)
     return batch.proposals
+
+
+def _render_theory_graph_summary(out: TheoryGraphSummaryOutput) -> str:
+    bullets = "\n".join(f"- {b}" for b in out.key_points)
+    actions = "\n".join(f"- {a}" for a in out.next_actions)
+    caution = f"\nCaution: {out.caution}" if out.caution else ""
+    return f"Overview: {out.overview}\n\nKey points:\n{bullets}\n\nNext actions:\n{actions}{caution}"
+
+
+def _call_theory_graph_tool(graph: dict) -> TheoryGraphSummaryOutput:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    nodes = list(graph.get("nodes", []))
+    edges = list(graph.get("edges", []))
+
+    # Keep prompt bounded; preserve highest-confidence nodes first.
+    nodes_sorted = sorted(nodes, key=lambda n: float(n.get("posterior", 0.0)), reverse=True)
+    compact_graph = {
+        "nodes": nodes_sorted[:40],
+        "edges": edges[:80],
+        "counts": {"nodes": len(nodes), "edges": len(edges)},
+    }
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=700,
+        tools=[THEORY_GRAPH_TOOL],
+        tool_choice={"type": "tool", "name": "summarize_theory_graph"},
+        messages=[{
+            "role": "user",
+            "content": (
+                "Summarize this hypothesis theory graph in plain English. "
+                "Do not invent data or claims.\n\n"
+                f"{json.dumps(compact_graph, indent=2)}\n\n"
+                "Call summarize_theory_graph with concise output."
+            ),
+        }],
+    )
+
+    tool_block = next(b for b in response.content if b.type == "tool_use")
+    return TheoryGraphSummaryOutput.model_validate(tool_block.input)
+
+
+def _template_theory_graph_summary(graph: dict) -> str:
+    nodes = list(graph.get("nodes", []))
+    edges = list(graph.get("edges", []))
+    if not nodes:
+        return "Overview: No hypotheses are currently available in the theory graph."
+
+    supported = [n for n in nodes if n.get("status") == "supported"]
+    refuted = [n for n in nodes if n.get("status") == "refuted"]
+    active = [n for n in nodes if n.get("status") == "active"]
+
+    top = sorted(nodes, key=lambda n: float(n.get("posterior", 0.0)), reverse=True)[:2]
+    top_lines = []
+    for n in top:
+        top_lines.append(
+            f"- \"{n.get('statement', 'unknown')}\" (status={n.get('status')}, "
+            f"P={float(n.get('posterior', 0.0)):.2f}, effect_mu={float(n.get('effect_mu', 0.0)):+.4f})"
+        )
+
+    decomp = sum(1 for e in edges if e.get("type") == "decomposes_into")
+    linked = sum(1 for e in edges if e.get("type") == "linked")
+
+    return (
+        f"Overview: Theory graph has {len(nodes)} hypotheses and {len(edges)} relationships. "
+        f"Supported={len(supported)}, refuted={len(refuted)}, active={len(active)}.\n\n"
+        f"Key points:\n{chr(10).join(top_lines) if top_lines else '- No ranked hypotheses yet.'}\n"
+        f"- Structural links: decomposes_into={decomp}, linked={linked}.\n\n"
+        "Next actions:\n"
+        "- Allocate more runs to the strongest active child hypotheses.\n"
+        "- Re-test high-posterior parent hypotheses with low-sample children.\n"
+        "- Archive stale active nodes if posterior remains near 0.5 after decision sprints."
+    )
 
 
 # ── Deterministic fallback ─────────────────────────────────────────────────────

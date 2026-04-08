@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS dimensions (
     frozen_value     TEXT,               -- JSON-encoded frozen value
     importance       REAL DEFAULT 0.5,   -- fANOVA score, 0-1
     n_samples        INTEGER DEFAULT 0,  -- how many experiments touched this dim
-    updated_at       REAL
+    updated_at       REAL,
+    is_canary        INTEGER DEFAULT 0,
+    canary_prob      REAL DEFAULT 1.0
 );
 
 -- ── Suggested config queue ────────────────────────────────────────────────────
@@ -79,13 +81,15 @@ CREATE TABLE IF NOT EXISTS program_snapshots (
     created_at       REAL NOT NULL
 );
 
--- ── Seed initial search space dimensions (autoresearch/nanochat defaults) ─────
-INSERT OR IGNORE INTO dimensions VALUES
-  ('DEPTH',             'int',         4,    24,   0, NULL,               0, NULL, 0.5, 0, 0),
-  ('learning_rate',     'float_log',   1e-4, 3e-2, 1, NULL,               0, NULL, 0.5, 0, 0),
-  ('TOTAL_BATCH_SIZE',  'categorical', NULL, NULL, 0, '[16384,32768,65536,131072]', 0, NULL, 0.5, 0, 0),
-  ('DEVICE_BATCH_SIZE', 'int',         4,    64,   0, NULL,               0, NULL, 0.5, 0, 0),
-  ('WINDOW_PATTERN',    'categorical', NULL, NULL, 0, '["L","SL","SSL","SSSL"]',   0, NULL, 0.5, 0, 0),
-  ('head_dim',          'categorical', NULL, NULL, 0, '[64,128]',         0, NULL, 0.5, 0, 0),
-  ('weight_decay',      'float_log',   1e-4, 1e-1, 1, NULL,               0, NULL, 0.5, 0, 0),
-  ('muon_lr',           'float_log',   1e-4, 1e-2, 1, NULL,               0, NULL, 0.5, 0, 0);
+-- ── Seed initial search space dimensions (MNIST digits classifier) ────────────
+-- Each row is a tunable hyperparameter in train.py.
+INSERT OR IGNORE INTO dimensions
+    (name, dtype, min_val, max_val, log_scale, categories, frozen, frozen_value,
+     importance, n_samples, updated_at, is_canary, canary_prob)
+VALUES
+    ('LR',           'float_log',   1e-4, 1e-1, 1, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('BATCH_SIZE',   'categorical', NULL, NULL, 0, '[16, 32, 64, 128, 256]',    0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('HIDDEN_SIZE',  'int',         32,   512,  0, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('N_LAYERS',     'int',         1,    5,    0, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('WEIGHT_DECAY', 'float_log',   1e-6, 1e-1, 1, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('OPTIMIZER',    'categorical', NULL, NULL, 0, '["adam", "sgd"]',           0, NULL, 0.5, 0, 0, 0, 1.0);

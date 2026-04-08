@@ -10,6 +10,10 @@ Usage:
     python simulate.py                   # 50 workers, 3 rounds
     python simulate.py --workers 100 --rounds 5
     python simulate.py --against-server  # run against live meta-agent HTTP server
+
+Note:
+    For real worker runs (outside this fake simulator), use the standard
+    training entrypoint name: train.py.
 """
 from __future__ import annotations
 
@@ -60,37 +64,39 @@ def _redact_token(token: Optional[str]) -> Optional[str]:
 
 # ── Fake training metric ──────────────────────────────────────────────────────
 
-def simulate_metric(config_delta: dict, p: float, noise: float = 0.08) -> float:
+def simulate_metric(config_delta: dict, p: float, noise: float = 0.008) -> float:
     """
-    Fake val_bpb trajectory for a given config.
-    Starts near 2.0, decreases over progress.
-    Good configs drop faster; bad ones barely move or worsen.
+    Fake val_bpb trajectory for MNIST digits classifier.
+    val_bpb = 1 - accuracy, so lower is better.
+    Starts near 0.1 (90% accuracy), best configs reach ~0.01 (99% accuracy).
     """
-    depth    = config_delta.get("DEPTH", 8)
-    lr       = config_delta.get("learning_rate", 1e-3)
-    baseline = 2.0
+    hidden   = config_delta.get("HIDDEN_SIZE", 128)
+    lr       = config_delta.get("LR", 1e-3)
+    n_layers = config_delta.get("N_LAYERS", 2)
+    baseline = 0.10
 
-    # Depth effect: higher depth is better (up to 14)
-    depth_bonus = -0.08 * min(depth, 14) / 14
+    # Larger hidden + more layers = better (up to a point)
+    arch_bonus = -0.02 * min(hidden, 256) / 256 - 0.005 * min(n_layers, 4) / 4
 
-    # LR effect: sweet spot around 2e-3
-    lr_dist = abs(math.log10(lr) - math.log10(2e-3))
-    lr_penalty = 0.03 * lr_dist
+    # LR effect: sweet spot around 1e-3
+    lr_dist    = abs(math.log10(max(lr, 1e-6)) - math.log10(1e-3))
+    lr_penalty = 0.01 * lr_dist
 
-    # Progress: metric generally improves over time (nonlinear)
-    improvement = 0.3 * (1 - math.exp(-3 * p))
+    # Progress: metric improves over training time
+    improvement = 0.07 * (1 - math.exp(-4 * p))
 
     noise_val = random.gauss(0, noise)
-    return baseline + depth_bonus + lr_penalty - improvement + noise_val
+    return max(0.001, baseline + arch_bonus + lr_penalty - improvement + noise_val)
 
 
 def random_config() -> dict:
-    """Sample a random config from the search space."""
+    """Sample a random config from the MNIST search space."""
     return {
-        "DEPTH":          random.choice([4, 6, 8, 10, 12, 14, 16]),
-        "learning_rate":  10 ** random.uniform(-4, -2),
-        "TOTAL_BATCH_SIZE": random.choice([16384, 32768, 65536, 131072]),
-        "WINDOW_PATTERN": random.choice(["L", "SL", "SSL", "SSSL"]),
+        "LR":           10 ** random.uniform(-4, -1),
+        "HIDDEN_SIZE":  random.choice([32, 64, 128, 256, 512]),
+        "N_LAYERS":     random.choice([1, 2, 3, 4, 5]),
+        "BATCH_SIZE":   random.choice([16, 32, 64, 128, 256]),
+        "OPTIMIZER":    random.choice(["adam", "sgd"]),
     }
 
 
@@ -112,7 +118,7 @@ async def run_local_worker(
     for step in range(1, n_steps + 1):
         p       = step / n_steps
         metric  = simulate_metric(config, p)
-        delta   = metric - 2.0   # baseline = 2.0
+        delta   = metric - 0.10   # baseline = 0.10 (90% accuracy)
 
         action  = scheduler.update_run(run_id, p=p, metric=metric, delta=delta)
         if trace:
@@ -137,7 +143,7 @@ async def run_local_worker(
             for extra_step in range(1, 3):
                 ep      = 1.0 + extra_step * 0.1
                 emetric = simulate_metric(config, min(ep, 1.2))
-                scheduler.update_run(run_id, p=ep, metric=emetric, delta=emetric - 2.0)
+                scheduler.update_run(run_id, p=ep, metric=emetric, delta=emetric - 0.10)
                 if trace:
                     trace.log(
                         "local_tick_extended",
@@ -223,7 +229,7 @@ async def simulate_local(n_workers: int = 50, n_rounds: int = 3, trace: Optional
         )
     print(f"Overall: {total} runs  |  {total_killed} killed ({total_killed/total*100:.1f}%)"
           f"  |  {total_extended} extended ({total_extended/total*100:.1f}%)")
-    print(f"Best metric seen: {best_metric:.4f}  (delta={best_metric - 2.0:+.4f})")
+    print(f"Best metric seen: {best_metric:.4f}  (delta={best_metric - 0.10:+.4f})")
 
 
 # ── HTTP simulation (against live server) ────────────────────────────────────
@@ -239,7 +245,7 @@ async def simulate_http_worker(
     """Simulate a worker against the live HTTP meta-agent."""
     import aiohttp
 
-    baseline_bpb = 2.0 + random.uniform(-0.05, 0.05)
+    baseline_bpb = 0.10 + random.uniform(-0.02, 0.02)
 
     # Register
     if trace:
@@ -347,7 +353,7 @@ async def simulate_http_worker(
             "config_delta":   config,
             "val_bpb":        metric,
             "delta_bpb":      delta,
-            "duration_seconds": 300,
+            "duration_seconds": 60,
         }
         if trace:
             trace.log("http_result_request", worker_id=worker_id, run_id=run_id, payload=result_payload)

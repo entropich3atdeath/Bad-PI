@@ -479,6 +479,29 @@ def get_meta_log():
     return runtime_state.meta_log.latest_markdown()
 
 
+@app.get("/theory_graph")
+def theory_graph():
+    """Structured parent/child/link hypothesis graph for analysis tooling."""
+    return runtime_state.registry.theory_graph()
+
+
+@app.get("/theory_graph/human")
+def theory_graph_human(include_graph: bool = False):
+    """
+    Human-readable derived narrative for the theory graph.
+    The JSON graph remains the authoritative source of truth.
+    """
+    graph = runtime_state.registry.theory_graph()
+    human = program_writer.summarize_theory_graph(graph)
+    payload = {
+        "source_of_truth": "machine_graph_json",
+        "derived_layer": human,
+    }
+    if include_graph:
+        payload["graph"] = graph
+    return payload
+
+
 @app.get("/dimension_proposals")
 def get_dimension_proposals():
     """

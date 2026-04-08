@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -11,7 +12,12 @@ log = logging.getLogger(__name__)
 
 from . import program_writer, store
 from .belief_engine import engine as belief_engine
-from .hypotheses import Hypothesis, HypothesisRegistry, make_default_registry
+from .hypotheses import (
+    Hypothesis,
+    HypothesisRegistry,
+    make_default_registry,
+    make_registry_from_dimensions,
+)
 from .meta_log import MetaHypothesisLog
 from .pipeline import pipeline
 from .population_manager import PopulationManager, Population
@@ -26,18 +32,39 @@ RUNTIME_STATE_PATH = Path(
 
 
 class RuntimeState:
+    DIM_SIGNAL_THRESHOLD = 2
+    CANARY_PROB = 0.12
+    CANARY_EVAL_RUNS = 40
+    CANARY_MIN_IMPROVEMENT = 0.001
+
     def __init__(self, state_path: Path = RUNTIME_STATE_PATH):
         self.state_path = state_path
-        self.registry: HypothesisRegistry = make_default_registry()
+        self.registry: HypothesisRegistry = HypothesisRegistry()
         self.population_manager = PopulationManager()
         self.meta_log = MetaHypothesisLog()
         self.pending_new_hypotheses: list[dict] = []
         self.pending_dimension_proposals: list[dict] = []   # LLM dim proposals when stalled
+        self.dimension_signal_counts: dict[str, int] = {}
+        self.canary_dimensions: dict[str, dict] = {}
         self._lock = threading.RLock()
 
     def initialize(self):
         with self._lock:
             self._load_locked()
+            dimensions = store.get_dimensions()
+            is_new_project = store.experiment_count() == 0
+
+            # New-project bootstrap rule:
+            # start with an empty/stale registry reset, then seed from schema dims.
+            if is_new_project:
+                self.registry = make_registry_from_dimensions(dimensions)
+                self.pending_new_hypotheses = []
+
+            # Defensive fallback for old state files with empty registries.
+            if not self.registry.active and not self.registry.archived:
+                self.registry = make_registry_from_dimensions(dimensions)
+
+            # Last-resort fallback when dimensions table is empty/unavailable.
             if not self.registry.active and not self.registry.archived:
                 self.registry = make_default_registry()
             self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
@@ -69,6 +96,152 @@ class RuntimeState:
         with self._lock:
             self.pending_dimension_proposals = []
             self._save_locked()
+
+    @staticmethod
+    def _proposal_signature(proposal: dict) -> str:
+        raw = str(proposal.get("name", "")).strip().lower()
+        return re.sub(r"[^a-z0-9]+", "", raw)
+
+    @staticmethod
+    def _is_identifier(name: str) -> bool:
+        return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name))
+
+    def _validate_dimension_proposal_bounds(self, proposal: dict) -> tuple[bool, str]:
+        name = str(proposal.get("name", "")).strip()
+        if not name or not self._is_identifier(name):
+            return False, "invalid_dimension_name"
+        if store.dimension_exists(name):
+            return False, "duplicate_dimension_name"
+
+        dtype = str(proposal.get("dtype", "")).strip().lower()
+        if dtype not in {"float_log", "float_linear", "int", "categorical"}:
+            return False, "invalid_dtype"
+
+        if dtype == "categorical":
+            cats = proposal.get("categories")
+            if not isinstance(cats, list) or len(cats) < 2:
+                return False, "invalid_categories"
+            if len(cats) > 8:
+                return False, "categories_too_large"
+            return True, "ok"
+
+        try:
+            lo = float(proposal.get("range_min"))
+            hi = float(proposal.get("range_max"))
+        except Exception:
+            return False, "invalid_range"
+        if not (lo < hi):
+            return False, "invalid_range_order"
+
+        if dtype == "int":
+            if (hi - lo) > 1024:
+                return False, "int_range_too_wide"
+            return True, "ok"
+
+        if dtype == "float_log":
+            if lo <= 0:
+                return False, "float_log_requires_positive_min"
+            if (hi / lo) > 1e4:
+                return False, "float_log_span_too_wide"
+            return True, "ok"
+
+        # float_linear
+        if (hi - lo) > 1e6:
+            return False, "float_linear_span_too_wide"
+        return True, "ok"
+
+    def _adopt_dimension_locked(self, proposal: dict, total_experiments: int) -> tuple[bool, str]:
+        ok, reason = self._validate_dimension_proposal_bounds(proposal)
+        if not ok:
+            return False, reason
+
+        name = str(proposal["name"]).strip()
+        dtype_raw = str(proposal.get("dtype", "")).strip().lower()
+        if dtype_raw == "categorical":
+            db_dtype = "categorical"
+            min_val = None
+            max_val = None
+            log_scale = 0
+            categories = list(proposal.get("categories") or [])
+        else:
+            db_dtype = "float" if dtype_raw == "float_linear" else dtype_raw
+            min_val = float(proposal.get("range_min"))
+            max_val = float(proposal.get("range_max"))
+            log_scale = 1 if dtype_raw == "float_log" else 0
+            categories = None
+
+        inserted = store.add_dimension(
+            name=name,
+            dtype=db_dtype,
+            min_val=min_val,
+            max_val=max_val,
+            log_scale=log_scale,
+            categories=categories,
+            importance=0.08,
+            is_canary=True,
+            canary_prob=self.CANARY_PROB,
+        )
+        if not inserted:
+            return False, "insert_failed_or_duplicate"
+
+        top1 = self._top_configs_locked(1)
+        baseline = None
+        if top1 and top1[0].get("delta_bpb") is not None:
+            baseline = float(top1[0]["delta_bpb"])
+
+        self.canary_dimensions[name] = {
+            "adopted_at_experiments": int(total_experiments),
+            "baseline_best_delta": baseline,
+            "max_runs": int(self.CANARY_EVAL_RUNS),
+            "min_improvement": float(self.CANARY_MIN_IMPROVEMENT),
+            "proposal": proposal,
+        }
+        return True, "adopted_canary"
+
+    def _evaluate_canary_dimensions_locked(self, total_experiments: int):
+        if not self.canary_dimensions:
+            return
+
+        top1 = self._top_configs_locked(1)
+        if not top1 or top1[0].get("delta_bpb") is None:
+            return
+        current_best = float(top1[0]["delta_bpb"])
+
+        to_remove: list[str] = []
+        for name, meta in list(self.canary_dimensions.items()):
+            adopted_at = int(meta.get("adopted_at_experiments", total_experiments))
+            max_runs = int(meta.get("max_runs", self.CANARY_EVAL_RUNS))
+            if (total_experiments - adopted_at) < max_runs:
+                continue
+
+            baseline = meta.get("baseline_best_delta")
+            min_improvement = float(meta.get("min_improvement", self.CANARY_MIN_IMPROVEMENT))
+
+            if baseline is None:
+                # No baseline at adoption time: keep as promoted by default.
+                store.set_dimension_canary(name, is_canary=False, canary_prob=1.0)
+                to_remove.append(name)
+                log.info(f"Promoted canary dimension '{name}' (no baseline available at adoption).")
+                continue
+
+            improvement = float(baseline) - current_best  # lower delta_bpb is better
+            if improvement < min_improvement:
+                store.remove_dimension(name)
+                to_remove.append(name)
+                log.info(
+                    f"Reverted canary dimension '{name}' after {max_runs} runs "
+                    f"(improvement={improvement:+.5f} < {min_improvement:+.5f})"
+                )
+            else:
+                store.set_dimension_canary(name, is_canary=False, canary_prob=1.0)
+                to_remove.append(name)
+                log.info(
+                    f"Promoted canary dimension '{name}' to full search "
+                    f"(improvement={improvement:+.5f} >= {min_improvement:+.5f})"
+                )
+
+        for name in to_remove:
+            self.canary_dimensions.pop(name, None)
 
     def shape_config_for_worker(self, worker_id: str, config: dict) -> dict:
         with self._lock:
@@ -128,13 +301,27 @@ class RuntimeState:
 
             experiments = store.recent_experiments(1000)
             dimensions = store.get_dimensions()
+
+            # Validation-phase hypotheses: schedule missing grid/arm cells deterministically.
+            validation_requests = self.registry.validation_config_requests(
+                experiments=experiments,
+                anchor_config=self._best_config_delta_locked(),
+            )
+            if validation_requests:
+                store.enqueue_configs(validation_requests)
+
+            # Validation tests update belief only when a full test completes.
+            self.registry.evaluate_validation_tests(experiments)
+
             belief_engine.on_experiment_complete(experiments, dimensions, self.registry.active)
 
-        # Track improvement trend for stall detection
-        top1 = self._top_configs_locked(1)
-        if top1 and top1[0].get("delta_bpb") is not None:
-            belief_engine.record_best_delta(total_experiments, float(top1[0]["delta_bpb"]))
+            # Track improvement trend for stall detection
+            top1 = self._top_configs_locked(1)
+            if top1 and top1[0].get("delta_bpb") is not None:
+                belief_engine.record_best_delta(total_experiments, float(top1[0]["delta_bpb"]))
 
+            # Evaluate canary dimensions for promotion/revert.
+            self._evaluate_canary_dimensions_locked(total_experiments)
 
             eliminated = self._archive_refuted_locked()
             population_changes = self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
@@ -184,10 +371,37 @@ class RuntimeState:
                         p.model_dump() if hasattr(p, "model_dump") else p.dict()
                         for p in new_dim_proposals
                     ]
+
+                    adopted_count = 0
+                    for p in serialized:
+                        sig = self._proposal_signature(p)
+                        if not sig:
+                            p["signal_count"] = 0
+                            p["adopted"] = False
+                            p["adoption_reason"] = "missing_signature"
+                            continue
+
+                        count = self.dimension_signal_counts.get(sig, 0) + 1
+                        self.dimension_signal_counts[sig] = count
+                        p["signal_count"] = count
+
+                        valid, reason = self._validate_dimension_proposal_bounds(p)
+                        p["adoption_eligible"] = valid and (count >= self.DIM_SIGNAL_THRESHOLD)
+                        if valid and count >= self.DIM_SIGNAL_THRESHOLD:
+                            adopted, adopt_reason = self._adopt_dimension_locked(p, total_experiments)
+                            p["adopted"] = adopted
+                            p["adoption_reason"] = adopt_reason
+                            if adopted:
+                                adopted_count += 1
+                        else:
+                            p["adopted"] = False
+                            p["adoption_reason"] = reason if not valid else "insufficient_repeated_signal"
+
                     self.pending_dimension_proposals.extend(serialized)
                     log.info(
                         f"Stall detected at n={total_experiments}: "
-                        f"{len(new_dim_proposals)} new dimension proposals queued"
+                        f"{len(new_dim_proposals)} new dimension proposals queued, "
+                        f"{adopted_count} adopted to canary"
                     )
 
             self._save_locked()
@@ -245,6 +459,8 @@ class RuntimeState:
             self.population_manager = PopulationManager.from_dict(data["population_manager"])
         self.pending_new_hypotheses = list(data.get("pending_new_hypotheses", []))
         self.pending_dimension_proposals = list(data.get("pending_dimension_proposals", []))
+        self.dimension_signal_counts = dict(data.get("dimension_signal_counts", {}))
+        self.canary_dimensions = dict(data.get("canary_dimensions", {}))
 
     def _save_locked(self):
         payload = {
@@ -252,6 +468,8 @@ class RuntimeState:
             "population_manager": self.population_manager.to_dict(),
             "pending_new_hypotheses": self.pending_new_hypotheses,
             "pending_dimension_proposals": self.pending_dimension_proposals,
+            "dimension_signal_counts": self.dimension_signal_counts,
+            "canary_dimensions": self.canary_dimensions,
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_path.with_suffix(".tmp")

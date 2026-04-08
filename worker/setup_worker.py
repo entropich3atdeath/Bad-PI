@@ -41,8 +41,7 @@ def _check_report_instrumentation(train_py: Path):
     has_budget_key = re.search(r"^\s*TOTAL_WALL_CLOCK_TIME\s*=", src, re.MULTILINE) is not None
 
     expected_patch_keys = [
-        "DEPTH", "learning_rate", "TOTAL_BATCH_SIZE", "DEVICE_BATCH_SIZE",
-        "WINDOW_PATTERN", "head_dim", "weight_decay", "muon_lr",
+        "LR", "BATCH_SIZE", "HIDDEN_SIZE", "N_LAYERS", "WEIGHT_DECAY", "OPTIMIZER",
     ]
     missing_patch_keys = [
         k for k in expected_patch_keys
