@@ -840,6 +840,8 @@ class HypothesisRegistry:
                     phase=str(proposal.get("phase", "exploration") or "exploration"),
                     test_spec=(dict(proposal.get("test_spec")) if isinstance(proposal.get("test_spec"), dict) else None),
                     parent_id=(str(proposal.get("parent_id")) if proposal.get("parent_id") else None),
+                    programme_id=(str(proposal["programme_id"]) if proposal.get("programme_id") else None),
+                    belt_role=str(proposal.get("belt_role") or "auxiliary"),
                 ))
             decisions.append(decision)
         return decisions

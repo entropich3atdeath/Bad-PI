@@ -49,6 +49,10 @@ def init_db():
             con.execute("ALTER TABLE dimensions ADD COLUMN is_canary INTEGER DEFAULT 0")
         if "canary_prob" not in dim_cols:
             con.execute("ALTER TABLE dimensions ADD COLUMN canary_prob REAL DEFAULT 1.0")
+        if "dim_role" not in dim_cols:
+            con.execute("ALTER TABLE dimensions ADD COLUMN dim_role TEXT DEFAULT 'variable'")
+        if "programme_label" not in dim_cols:
+            con.execute("ALTER TABLE dimensions ADD COLUMN programme_label TEXT DEFAULT NULL")
 
 
 # ── Workers ───────────────────────────────────────────────────────────────────
@@ -286,6 +290,8 @@ def get_dimensions() -> list[dict]:
                 d["frozen_value"] = json.loads(d["frozen_value"])
             d["is_canary"] = bool(d.get("is_canary", 0))
             d["canary_prob"] = float(d.get("canary_prob", 1.0) or 1.0)
+            d["dim_role"] = d.get("dim_role") or "variable"
+            d["programme_label"] = d.get("programme_label")
             result.append(d)
         return result
 
@@ -310,6 +316,8 @@ def add_dimension(
     importance: float = 0.08,
     is_canary: bool = True,
     canary_prob: float = 0.12,
+    dim_role: str = "variable",
+    programme_label: Optional[str] = None,
 ) -> bool:
     if dimension_exists(name):
         return False
@@ -318,8 +326,9 @@ def add_dimension(
             """
             INSERT INTO dimensions
             (name, dtype, min_val, max_val, log_scale, categories, frozen, frozen_value,
-             importance, n_samples, updated_at, is_canary, canary_prob)
-            VALUES (?,?,?,?,?,?,0,NULL,?,?,?, ?,?)
+             importance, n_samples, updated_at, is_canary, canary_prob,
+             dim_role, programme_label)
+            VALUES (?,?,?,?,?,?,0,NULL,?,?,?, ?,?, ?,?)
             """,
             (
                 name,
@@ -333,6 +342,8 @@ def add_dimension(
                 time.time(),
                 1 if is_canary else 0,
                 float(canary_prob),
+                str(dim_role),
+                programme_label,
             ),
         )
     return True

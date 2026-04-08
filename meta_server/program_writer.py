@@ -81,6 +81,22 @@ class HypothesisProposal(BaseModel):
     parent_id:         Optional[str] = Field(default=None, description="Optional parent hypothesis id if this is a decomposition/refinement")
     phase:             str   = Field(default="exploration", description="exploration | validation")
     test_spec:         dict = Field(description="Executable test protocol (required). Defines how to falsify the claim via controlled experiment.")
+    proposal_scope:    str   = Field(
+        default="variable",
+        description=(
+            "Scope of this hypothesis. "
+            "'programme' = proposes a research direction at the programme level "
+            "(e.g. comparing two architecture families or optimizer paradigms as overall strategies); "
+            "'variable' = tests a specific hyperparameter within a named research programme."
+        ),
+    )
+    target_programme:  Optional[str] = Field(
+        default=None,
+        description=(
+            "Exact name of the research programme this hypothesis targets "
+            "(e.g. 'OPTIMIZER=adam'). Required when proposal_scope='variable'."
+        ),
+    )
 
 
 class HypothesisProposalBatch(BaseModel):
@@ -160,6 +176,48 @@ THEORY_GRAPH_TOOL = {
 
 # ── Rendering (deterministic — no LLM) ────────────────────────────────────────
 
+def build_programme_context(programmes: list[dict], dimensions: list[dict]) -> dict:
+    """
+    Build the Lakatosian programme context that is injected into LLM prompts.
+
+    Returns a dict describing:
+    - core_dimensions: dims that define programme boundaries (dim_role='core')
+    - variable_dimensions: tunable dims within each programme (dim_role='variable')
+    - programmes: current rivalry snapshot (name, status, hard_core, progressiveness)
+    """
+    core_dims = [
+        {
+            "name": d["name"],
+            "dtype": d.get("dtype"),
+            "categories": d.get("categories"),
+        }
+        for d in dimensions if d.get("dim_role") == "core"
+    ]
+    variable_dims = [
+        {
+            "name": d["name"],
+            "dtype": d.get("dtype"),
+            "programme_label": d.get("programme_label"),  # None = universal
+        }
+        for d in dimensions if d.get("dim_role") != "core"
+    ]
+    programme_rows = [
+        {
+            "name": p.get("name"),
+            "status": p.get("status"),
+            "progressiveness_ratio": p.get("progressiveness_ratio"),
+            "hard_core": p.get("hard_core"),
+            "confirmed_predictions": p.get("confirmed_novel_predictions", 0),
+            "anomaly_count": p.get("anomaly_count", 0),
+        }
+        for p in programmes
+    ]
+    return {
+        "core_dimensions": core_dims,
+        "variable_dimensions": variable_dims,
+        "programmes": programme_rows,
+    }
+
 def render_program_md(out: ProgramMDOutput, bs: "BeliefState", active_workers: int) -> str:
     """Convert validated ProgramMDOutput → markdown string. Pure Python, no LLM."""
     phase = "WARMUP" if not bs.warmup_complete else "ACTIVE SEARCH"
@@ -222,14 +280,16 @@ def generate_program_md(bs: "BeliefState", active_workers: int) -> str:
         return _template_fallback(bs, active_workers)
 
 
-def propose_new_hypotheses(bs: "BeliefState") -> list[HypothesisProposal]:
+def propose_new_hypotheses(bs: "BeliefState", programme_context: Optional[dict] = None) -> list[HypothesisProposal]:
     """
     Ask the LLM to propose new hypotheses based on the current BeliefState.
+    In Lakatos/hybrid mode, pass programme_context so the LLM understands the
+    programme structure and can scope proposals at the right level.
     Returns validated HypothesisProposal objects ready for HypothesisRegistry.
     Falls back to empty list on error — never corrupts belief state.
     """
     try:
-        return _call_hypothesis_tool(bs)
+        return _call_hypothesis_tool(bs, programme_context=programme_context)
     except Exception as e:
         log.warning(f"hypothesis proposal failed ({type(e).__name__}: {e}) — skipping")
         return []
@@ -368,10 +428,46 @@ def _call_program_md_tool(bs: "BeliefState") -> ProgramMDOutput:
     return ProgramMDOutput.model_validate(tool_block.input)
 
 
-def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
+def _call_hypothesis_tool(bs: "BeliefState", programme_context: Optional[dict] = None) -> list[HypothesisProposal]:
     import anthropic
     client  = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     context = _build_math_context(bs)
+
+    # ── Lakatos programme layer instructions ──────────────────────────────
+    programme_block = ""
+    if programme_context and programme_context.get("programmes"):
+        core_lines = ""
+        for cd in programme_context.get("core_dimensions", []):
+            cats = cd.get("categories")
+            cat_str = f" (values: {cats})" if cats else ""
+            core_lines += f"  - {cd['name']}{cat_str} — defines programme boundaries\n"
+
+        prog_lines = ""
+        for p in programme_context["programmes"]:
+            prog_lines += (
+                f"  - '{p['name']}': status={p['status']}, "
+                f"progressiveness={p.get('progressiveness_ratio', 0):.2f}, "
+                f"confirmed_predictions={p.get('confirmed_predictions', 0)}, "
+                f"anomalies={p.get('anomaly_count', 0)}\n"
+            )
+
+        var_names = [d["name"] for d in programme_context.get("variable_dimensions", [])]
+
+        programme_block = (
+            "\n## Lakatos research programmes\n"
+            "This session uses Lakatosian science mode with competing research programmes.\n"
+            "Programmes are defined by CORE dimensions (hard-core commitments).\n"
+            "Variable dimensions are tuned within each programme's protective belt.\n\n"
+            f"Core dimensions (programme boundaries):\n{core_lines}\n"
+            f"Current programmes:\n{prog_lines}\n"
+            f"Variable dimensions (belt): {', '.join(var_names)}\n\n"
+            "When proposing hypotheses, choose the right scope:\n"
+            "- proposal_scope='programme': compare two whole programmes "
+            "(e.g. 'Adam-based programmes outperform SGD at high LR') — set target_programme=null.\n"
+            "- proposal_scope='variable': test a specific variable dim inside one programme "
+            "— set target_programme to the EXACT programme name from the list above.\n"
+            "At least one proposal should target the most progressive programme.\n"
+        )
 
     response = client.messages.create(
         model      = "claude-sonnet-4-20250514",
@@ -388,8 +484,9 @@ def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
                 "phase=validation: mature hypothesis, test_spec is strict experimental protocol.\n"
                 "Supported test_spec.type values: single_factor_effect, interaction_grid.\n"
                 "For single_factor_effect include {variable, values, min_runs_per_cell, decision_rule:{threshold}}.\n"
-                "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n\n"
-                f"{context}\n\n"
+                "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n"
+                + programme_block
+                + f"\n{context}\n\n"
                 "Call propose_hypotheses with your proposals."
             ),
         }],

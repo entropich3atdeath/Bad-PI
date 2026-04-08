@@ -182,8 +182,80 @@ class ProgrammeRegistry:
     def get(self, programme_id: str) -> Optional[ResearchProgramme]:
         return self._active.get(programme_id) or self._archived.get(programme_id)
 
+    def programme_by_name(self, name: str) -> Optional[ResearchProgramme]:
+        """Case-insensitive name lookup across active programmes."""
+        name_lo = name.strip().lower()
+        for p in self._active.values():
+            if p.name.strip().lower() == name_lo:
+                return p
+        return None
+
     def add(self, programme: ResearchProgramme):
         self._active[programme.id] = programme
+
+    @classmethod
+    def from_core_dimensions(cls, dimensions: list[dict]) -> "ProgrammeRegistry":
+        """
+        Seed the registry from schema dimensions tagged dim_role='core'.
+
+        For each core categorical dimension (e.g. OPTIMIZER with values [adam, sgd])
+        one ResearchProgramme is created per category value.  That value becomes the
+        hard_core commitment; variable-role dimensions form the tunable protective belt.
+
+        If no core dimensions exist the registry falls back to a single default programme
+        (same behaviour as the old Popper-mode bootstrap).
+        """
+        reg = cls()
+        core_dims = [d for d in dimensions if d.get("dim_role") == "core"]
+
+        if not core_dims:
+            reg.ensure_default_programme(dimensions)
+            return reg
+
+        variable_dims = [d for d in dimensions if d.get("dim_role") != "core"]
+        var_names = [d["name"] for d in variable_dims]
+
+        for core_dim in core_dims:
+            dim_name = core_dim["name"]
+            cats = core_dim.get("categories") or []
+
+            if not cats:
+                # Non-categorical core dim (e.g. int/float axis): single programme
+                prog = ResearchProgramme(
+                    name=f"{dim_name} programme",
+                    hard_core=[f"{dim_name} is the primary research axis"],
+                    positive_heuristic=(
+                        f"Systematically vary {dim_name} and all supporting variable dims: "
+                        + ", ".join(var_names[:5]) + "."
+                    ),
+                    negative_heuristic=(
+                        f"Do not abandon the {dim_name} axis based on a single anomalous run."
+                    ),
+                    metadata={"core_dimension": dim_name},
+                )
+                reg.add(prog)
+            else:
+                for cat_val in cats:
+                    prog_name = f"{dim_name}={cat_val}"
+                    prog = ResearchProgramme(
+                        name=prog_name,
+                        hard_core=[f"{dim_name} = {cat_val}"],
+                        positive_heuristic=(
+                            f"Within the {cat_val} paradigm, optimise variable dims: "
+                            + ", ".join(var_names[:5]) + "."
+                        ),
+                        negative_heuristic=(
+                            f"Do not abandon {cat_val} based on isolated anomalies; "
+                            f"refine the protective belt (adjust variable dims) instead."
+                        ),
+                        metadata={
+                            "core_dimension": dim_name,
+                            "core_value": str(cat_val),
+                        },
+                    )
+                    reg.add(prog)
+
+        return reg
 
     def ensure_default_programme(self, dimensions: list[dict]) -> ResearchProgramme:
         existing = next((p for p in self._active.values() if p.name == "Main programme"), None)

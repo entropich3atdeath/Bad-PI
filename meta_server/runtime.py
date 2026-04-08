@@ -74,6 +74,9 @@ class RuntimeState:
 
             # Lakatos layer bootstrap/sync (mode-gated).
             if self.science_mode in {"lakatos", "hybrid"}:
+                if is_new_project or not self.programme_registry.active:
+                    # Seed programmes from core dimensions on first run or empty registry.
+                    self.programme_registry = ProgrammeRegistry.from_core_dimensions(dimensions)
                 self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
                 self.programme_registry.classify_programmes()
             self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
@@ -367,11 +370,33 @@ class RuntimeState:
             content = program_writer.generate_program_md(belief_state, store.active_worker_count())
             store.save_program_snapshot(content, total_experiments)
 
-            proposals = program_writer.propose_new_hypotheses(belief_state)
+            proposals = program_writer.propose_new_hypotheses(
+                belief_state,
+                programme_context=(
+                    program_writer.build_programme_context(
+                        programmes=self.programme_registry.rivalry_snapshot(),
+                        dimensions=store.get_dimensions(),
+                    )
+                    if self.science_mode in {"lakatos", "hybrid"} else None
+                ),
+            )
             proposal_payloads = [
                 proposal.model_dump() if hasattr(proposal, "model_dump") else proposal.dict()
                 for proposal in proposals
             ]
+
+            # Lakatos mode: resolve target_programme name → programme_id before ingest.
+            if self.science_mode in {"lakatos", "hybrid"}:
+                for payload in proposal_payloads:
+                    target_name = payload.get("target_programme")
+                    if target_name and not payload.get("programme_id"):
+                        match = self.programme_registry.programme_by_name(target_name)
+                        if match:
+                            payload["programme_id"] = match.id
+                    # Programme-scope hypotheses become hard_core-level belt entries.
+                    if payload.get("proposal_scope") == "programme":
+                        payload["belt_role"] = "hard_core"
+
             decisions = self.registry.ingest_llm_proposals(proposal_payloads)
             accepted = [d["proposal"] for d in decisions if d["engine_gate"].get("accepted")]
             if accepted:
