@@ -4,7 +4,7 @@
 
 Developer smoke-test / regression guide: [dev_checklist_readme.md](dev_checklist_readme.md)
 
-1000 workers, each running 5-minute training experiments on their own GPU, coordinated by **Bad PI**: maintaining scientific hypotheses, updating beliefs from evidence, eliminating bad ideas deliberately, and continuously narrowing the search space.
+1000+ workers, each running 5-minute training experiments on their own GPU, coordinated by **Bad PI**: maintaining scientific hypotheses, updating beliefs from evidence, eliminating bad ideas deliberately, and continuously narrowing the search space.
 
 ---
 
