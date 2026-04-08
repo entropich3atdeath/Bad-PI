@@ -44,6 +44,12 @@ def init_db():
         if "auth_token" not in cols:
             con.execute("ALTER TABLE workers ADD COLUMN auth_token TEXT")
 
+        dim_cols = {row[1] for row in con.execute("PRAGMA table_info(dimensions)").fetchall()}
+        if "is_canary" not in dim_cols:
+            con.execute("ALTER TABLE dimensions ADD COLUMN is_canary INTEGER DEFAULT 0")
+        if "canary_prob" not in dim_cols:
+            con.execute("ALTER TABLE dimensions ADD COLUMN canary_prob REAL DEFAULT 1.0")
+
 
 # ── Workers ───────────────────────────────────────────────────────────────────
 
@@ -278,8 +284,75 @@ def get_dimensions() -> list[dict]:
                 d["categories"] = json.loads(d["categories"])
             if d["frozen_value"]:
                 d["frozen_value"] = json.loads(d["frozen_value"])
+            d["is_canary"] = bool(d.get("is_canary", 0))
+            d["canary_prob"] = float(d.get("canary_prob", 1.0) or 1.0)
             result.append(d)
         return result
+
+
+def dimension_exists(name: str) -> bool:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT 1 FROM dimensions WHERE lower(name)=lower(?)",
+            (name,),
+        ).fetchone()
+    return row is not None
+
+
+def add_dimension(
+    *,
+    name: str,
+    dtype: str,
+    min_val: Optional[float],
+    max_val: Optional[float],
+    log_scale: int,
+    categories: Optional[list],
+    importance: float = 0.08,
+    is_canary: bool = True,
+    canary_prob: float = 0.12,
+) -> bool:
+    if dimension_exists(name):
+        return False
+    with _conn() as con:
+        con.execute(
+            """
+            INSERT INTO dimensions
+            (name, dtype, min_val, max_val, log_scale, categories, frozen, frozen_value,
+             importance, n_samples, updated_at, is_canary, canary_prob)
+            VALUES (?,?,?,?,?,?,0,NULL,?,?,?, ?,?)
+            """,
+            (
+                name,
+                dtype,
+                min_val,
+                max_val,
+                int(log_scale),
+                json.dumps(categories) if categories is not None else None,
+                float(importance),
+                0,
+                time.time(),
+                1 if is_canary else 0,
+                float(canary_prob),
+            ),
+        )
+    return True
+
+
+def set_dimension_canary(name: str, *, is_canary: bool, canary_prob: float = 1.0):
+    with _conn() as con:
+        con.execute(
+            """
+            UPDATE dimensions
+            SET is_canary=?, canary_prob=?, updated_at=?
+            WHERE name=?
+            """,
+            (1 if is_canary else 0, float(canary_prob), time.time(), name),
+        )
+
+
+def remove_dimension(name: str):
+    with _conn() as con:
+        con.execute("DELETE FROM dimensions WHERE name=?", (name,))
 
 
 def update_dimension_importance(name: str, importance: float, n_samples: int):

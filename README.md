@@ -276,6 +276,55 @@ The graph JSON is the source of truth. The `/theory_graph/human` response is exp
 
 ---
 
+## Safe auto-adoption of new dimensions (stall recovery)
+
+When search is stalled, Bad PI still asks the LLM for **new dimensions** (not just new hypotheses). Those proposals can now be auto-adopted into live search only if all gates pass:
+
+1. Schema-valid and unique dimension name
+2. Repeated signal: same normalized proposal appears in at least 2 stall cycles
+3. Bounded search space
+  - numeric ranges must be sane (`min < max`, capped span)
+  - categorical proposals capped at 8 categories
+4. Canary phase on adoption
+  - starts with low importance and canary sampling probability (~12% of proposed configs)
+  - evaluated after 40 completed experiments
+  - auto-reverted if best delta does not improve by at least 0.001
+
+If canary improves best delta enough, it is promoted to normal full-search behavior automatically.
+
+---
+
+## Executable validation tests (TestSpec, v1)
+
+Bad PI now supports a validation phase where a hypothesis is not just text — it can include an executable `test_spec`.
+
+- `phase="exploration"` → normal broad search behavior
+- `phase="validation"` + `test_spec` → protocol-driven testing
+
+Two deterministic test types are live in v1:
+
+1. `single_factor_effect`
+  - Vary one variable over specific arms (e.g. `DEPTH` in `[8, 12]`)
+  - Require `min_runs_per_cell` repeats per arm
+  - Compute arm means and compare effect size to `decision_rule.threshold`
+
+2. `interaction_grid`
+  - Build a 2D grid over two variables (e.g. `DEPTH` × `learning_rate`)
+  - Fill each cell to `min_runs_per_cell`
+  - Compute deterministic interaction strength (deviation from additive expectation)
+  - Mark test win/loss by threshold
+
+How they work together in practice:
+
+- Use `single_factor_effect` first to verify a clean main effect.
+- Use `interaction_grid` next to test whether variable combinations produce non-additive gains.
+
+Important: for validation hypotheses, Bad PI updates belief on **completed tests** (one vote per completed protocol), not every individual run.
+
+Detailed spec and examples: [docs/testspec_validation.md](docs/testspec_validation.md)
+
+---
+
 ## Meta-hypothesis log
 
 Every 100 experiments the PI writes a new checkpoint to `meta_hypothesis_log.md`:
