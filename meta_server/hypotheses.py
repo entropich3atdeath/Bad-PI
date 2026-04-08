@@ -56,6 +56,8 @@ class Hypothesis:
     source: str              = "default"   # "default" | "llm_proposed" — controls credibility ramp
     phase: str               = "exploration"  # exploration | validation
     test_spec: Optional[dict] = None
+    programme_id: Optional[str] = None
+    belt_role: str = "auxiliary"  # hard_core | auxiliary
     parent_id: Optional[str] = None
     children_ids: list[str]  = field(default_factory=list)
     linked_ids: list[str]    = field(default_factory=list)
@@ -297,6 +299,8 @@ class Hypothesis:
             "status": self.status,
             "phase": self.phase,
             "test_spec": self.test_spec,
+            "programme_id": self.programme_id,
+            "belt_role": self.belt_role,
             "n_experiments": self.n_experiments,
             "effect_mu": round(self.effect_mu, 6),
             "effect_sem": round(self.effect_sem, 6),
@@ -320,6 +324,8 @@ class Hypothesis:
             "evidence_log": self.evidence_log, "source": self.source,
             "phase": self.phase,
             "test_spec": self.test_spec,
+            "programme_id": self.programme_id,
+            "belt_role": self.belt_role,
             "parent_id": self.parent_id,
             "children_ids": self.children_ids,
             "linked_ids": self.linked_ids,

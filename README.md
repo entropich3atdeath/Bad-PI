@@ -216,6 +216,15 @@ The server now maintains a persistent runtime state (`meta_server/runtime.py`) t
 9. **Checkpoints** the meta-hypothesis log every 100 experiments.
 10. **Persists** all state to `runtime_state.json` (path configurable via `META_RUNTIME_STATE_PATH`).
 
+### Lakatos layer (additive)
+
+Bad PI now includes an additive `ProgrammeRegistry` layer (`meta_server/lakatos.py`) above hypothesis updates:
+
+- `ResearchProgramme` = hard core + protective belt (linked hypothesis IDs)
+- Refuted auxiliaries are treated as anomalies and queued as pending belt modifications
+- Programme health is tracked by a progressiveness ratio over resolved novel predictions
+- Existing mechanics (Beta-Binomial, test_spec, populations, worker protocol) are unchanged
+
 ### What workers see in `next_config` (population-aware)
 
 ```json
@@ -271,6 +280,8 @@ Inspect parent/child and linked hypothesis structure:
 
 - `GET /theory_graph` → `{ "nodes": [...], "edges": [...] }`
 - `GET /theory_graph/human` → human-readable derived summary layer
+- `GET /programmes` → Lakatosian programme health snapshot
+- `GET /programmes/belt_modifications` → pending protective-belt modification suggestions
 
 Edge types:
 - `decomposes_into` (parent → child)

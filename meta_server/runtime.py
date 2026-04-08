@@ -21,6 +21,7 @@ from .hypotheses import (
 from .meta_log import MetaHypothesisLog
 from .pipeline import pipeline
 from .population_manager import PopulationManager, Population
+from .lakatos import ProgrammeRegistry
 
 
 RUNTIME_STATE_PATH = Path(
@@ -40,6 +41,7 @@ class RuntimeState:
     def __init__(self, state_path: Path = RUNTIME_STATE_PATH):
         self.state_path = state_path
         self.registry: HypothesisRegistry = HypothesisRegistry()
+        self.programme_registry = ProgrammeRegistry()
         self.population_manager = PopulationManager()
         self.meta_log = MetaHypothesisLog()
         self.pending_new_hypotheses: list[dict] = []
@@ -67,6 +69,10 @@ class RuntimeState:
             # Last-resort fallback when dimensions table is empty/unavailable.
             if not self.registry.active and not self.registry.archived:
                 self.registry = make_default_registry()
+
+            # Lakatos layer bootstrap/sync (additive; does not replace hypothesis math).
+            self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
+            self.programme_registry.classify_programmes()
             self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
 
     def build_belief_state(self):
@@ -313,6 +319,12 @@ class RuntimeState:
             # Validation tests update belief only when a full test completes.
             self.registry.evaluate_validation_tests(experiments)
 
+            # Lakatos layer update: map hypothesis outcomes to programme events.
+            self.programme_registry.sync_from_hypotheses(self.registry.active, dimensions)
+            for h in self.registry.active:
+                self.programme_registry.record_hypothesis_event(h)
+            self.programme_registry.classify_programmes()
+
             belief_engine.on_experiment_complete(experiments, dimensions, self.registry.active)
 
             # Track improvement trend for stall detection
@@ -360,6 +372,8 @@ class RuntimeState:
             accepted = [d["proposal"] for d in decisions if d["engine_gate"].get("accepted")]
             if accepted:
                 self.pending_new_hypotheses.extend(accepted)
+                self.programme_registry.sync_from_hypotheses(self.registry.active, store.get_dimensions())
+                self.programme_registry.classify_programmes()
                 self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
 
             # Stall detection: ask LLM for new dimensions beyond the current search space
@@ -455,6 +469,8 @@ class RuntimeState:
         data = json.loads(self.state_path.read_text())
         if "registry" in data:
             self.registry = HypothesisRegistry.from_dict(data["registry"])
+        if "programme_registry" in data:
+            self.programme_registry = ProgrammeRegistry.from_dict(data["programme_registry"])
         if "population_manager" in data:
             self.population_manager = PopulationManager.from_dict(data["population_manager"])
         self.pending_new_hypotheses = list(data.get("pending_new_hypotheses", []))
@@ -465,6 +481,7 @@ class RuntimeState:
     def _save_locked(self):
         payload = {
             "registry": self.registry.to_dict(),
+            "programme_registry": self.programme_registry.to_dict(),
             "population_manager": self.population_manager.to_dict(),
             "pending_new_hypotheses": self.pending_new_hypotheses,
             "pending_dimension_proposals": self.pending_dimension_proposals,

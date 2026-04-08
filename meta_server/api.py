@@ -485,6 +485,25 @@ def theory_graph():
     return runtime_state.registry.theory_graph()
 
 
+@app.get("/programmes")
+def programmes():
+    """Lakatosian research-programme health snapshot (additive to theory graph)."""
+    return {
+        "count": len(runtime_state.programme_registry.active),
+        "programmes": runtime_state.programme_registry.rivalry_snapshot(),
+    }
+
+
+@app.get("/programmes/belt_modifications")
+def programme_belt_modifications():
+    """Pending protective-belt modification suggestions from anomaly handling."""
+    pending = runtime_state.programme_registry.pending_belt_modifications
+    return {
+        "count": len(pending),
+        "items": pending,
+    }
+
+
 @app.get("/theory_graph/human")
 def theory_graph_human(include_graph: bool = False):
     """
