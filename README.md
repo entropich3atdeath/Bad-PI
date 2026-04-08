@@ -2,9 +2,11 @@
 
 **Bad PI: a coordination layer for distributed [autoresearch](https://github.com/karpathy/autoresearch) swarms.**
 
-Developer smoke-test / regression guide: [dev_checklist_readme.md](dev_checklist_readme.md)
+Autoresearch by yourself is great. Autoresearch with friends is better!!
 
 1000+ workers, each running 5-minute training experiments on their own GPU, coordinated by **Bad PI**: maintaining scientific hypotheses, updating beliefs from evidence, eliminating bad ideas deliberately, and continuously narrowing the search space.
+
+Developer smoke-test / regression guide: [dev_checklist_readme.md](dev_checklist_readme.md)
 
 ---
 
