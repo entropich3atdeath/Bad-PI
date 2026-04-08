@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  meta-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}   # optional: enables LLM program.md writes
+      - META_ENROLL_TOKEN=${META_ENROLL_TOKEN:-}   # optional: shared invite token required for worker registration
+    volumes:
+      - ./data:/app/data        # persists experiments.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional: expose a live dashboard (simple nginx serving leaderboard.json)
+  # dashboard:
+  #   image: nginx:alpine
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - ./dashboard:/usr/share/nginx/html:ro

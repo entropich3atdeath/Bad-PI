@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite
+*.db
+*.db-*
+*.log
+*.tmp
+.DS_Store
+worker/.worker_config.json
+meta_server/runtime_state.json
+docs/uvicorn_sim.log

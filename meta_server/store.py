@@ -1,0 +1,336 @@
+"""
+meta_server/store.py
+All SQLite read/write operations. Thread-safe via connection-per-call pattern.
+"""
+from __future__ import annotations
+import json
+import os
+import secrets
+import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Optional
+
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "experiments.db")))
+SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+# Duplicate-trial policy (confidence vs waste)
+MAX_TRIALS_PER_CONFIG = 6        # hard cap for any exact config
+MAX_INFLIGHT_PER_CONFIG = 2      # prevent too many simultaneous duplicates
+
+
+@contextmanager
+def _conn():
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=5000")
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def init_db():
+    with _conn() as con:
+        con.executescript(SCHEMA_PATH.read_text())
+        cols = {row[1] for row in con.execute("PRAGMA table_info(workers)").fetchall()}
+        if "auth_token" not in cols:
+            con.execute("ALTER TABLE workers ADD COLUMN auth_token TEXT")
+
+
+# ── Workers ───────────────────────────────────────────────────────────────────
+
+def register_worker(worker_id: str, gpu_type: str, baseline_bpb: float, contact: Optional[str]) -> str:
+    now = time.time()
+    auth_token = secrets.token_urlsafe(32)
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO workers (worker_id, gpu_type, baseline_bpb, contact, auth_token, registered_at, last_seen)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(worker_id) DO UPDATE SET
+                gpu_type=excluded.gpu_type,
+                baseline_bpb=excluded.baseline_bpb,
+                auth_token=excluded.auth_token,
+                last_seen=excluded.last_seen
+        """, (worker_id, gpu_type, baseline_bpb, contact, auth_token, now, now))
+    return auth_token
+
+
+def touch_worker(worker_id: str):
+    with _conn() as con:
+        con.execute("UPDATE workers SET last_seen=? WHERE worker_id=?", (time.time(), worker_id))
+
+
+def get_worker(worker_id: str) -> Optional[dict]:
+    with _conn() as con:
+        row = con.execute("SELECT * FROM workers WHERE worker_id=?", (worker_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def verify_worker_token(worker_id: str, auth_token: Optional[str]) -> bool:
+    if not auth_token:
+        return False
+    with _conn() as con:
+        row = con.execute(
+            "SELECT 1 FROM workers WHERE worker_id=? AND auth_token=?",
+            (worker_id, auth_token),
+        ).fetchone()
+    return row is not None
+
+
+def active_worker_count(window_seconds: int = 600) -> int:
+    cutoff = time.time() - window_seconds
+    with _conn() as con:
+        return con.execute(
+            "SELECT COUNT(*) FROM workers WHERE last_seen > ?", (cutoff,)
+        ).fetchone()[0]
+
+
+# ── Experiments ───────────────────────────────────────────────────────────────
+
+def save_experiment(
+    exp_id: str,
+    worker_id: str,
+    config: dict,
+    config_delta: dict,
+    val_bpb: Optional[float],
+    delta_bpb: Optional[float],
+    duration: float,
+    status: str = "completed",
+    error: Optional[str] = None,
+):
+    now = time.time()
+    with _conn() as con:
+        config_json = _config_fingerprint(config)
+        delta_json = _config_fingerprint(config_delta)
+        con.execute("""
+            INSERT OR REPLACE INTO experiments
+            (exp_id, worker_id, config, config_delta, val_bpb, delta_bpb,
+             duration_seconds, status, error, completed_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            exp_id, worker_id,
+            config_json, delta_json,
+            val_bpb, delta_bpb, duration, status, error, now
+        ))
+        con.execute(
+            "UPDATE workers SET experiment_count=experiment_count+1, last_seen=? WHERE worker_id=?",
+            (now, worker_id)
+        )
+        con.execute(
+            "UPDATE config_queue SET status='completed' WHERE exp_id=?", (exp_id,)
+        )
+
+
+def experiment_count() -> int:
+    with _conn() as con:
+        return con.execute(
+            "SELECT COUNT(*) FROM experiments WHERE status='completed'"
+        ).fetchone()[0]
+
+
+def recent_experiments(limit: int = 500) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute("""
+            SELECT e.*, w.baseline_bpb, w.gpu_type
+            FROM experiments e
+            JOIN workers w ON e.worker_id = w.worker_id
+            WHERE e.status='completed'
+            ORDER BY e.completed_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def top_experiments(n: int = 10) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute("""
+            SELECT * FROM experiments
+            WHERE status='completed' AND delta_bpb IS NOT NULL
+            ORDER BY delta_bpb ASC
+            LIMIT ?
+        """, (n,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── Config queue ──────────────────────────────────────────────────────────────
+
+def _config_fingerprint(delta: dict) -> str:
+    """Canonical JSON key used to identify duplicate configs across queue + experiments."""
+    return json.dumps(delta, sort_keys=True, separators=(",", ":"))
+
+
+def _desired_repeats(priority: float) -> int:
+    """
+    How many total trials we *aim* for before considering a config statistically confident.
+    High-priority configs get more repeats for confidence; low-priority get fewer.
+    """
+    if priority >= 0.85:
+        return 4
+    if priority >= 0.70:
+        return 3
+    if priority >= 0.55:
+        return 2
+    return 1
+
+
+def _count_completed_for_config(con: sqlite3.Connection, fingerprint: str) -> int:
+    row = con.execute(
+        "SELECT COUNT(*) FROM experiments WHERE status='completed' AND config_delta=?",
+        (fingerprint,),
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _count_inflight_for_config(con: sqlite3.Connection, fingerprint: str) -> int:
+    row = con.execute(
+        """
+        SELECT COUNT(*) FROM config_queue
+        WHERE config_delta=? AND status IN ('pending','assigned')
+        """,
+        (fingerprint,),
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+def enqueue_configs(configs: list[tuple[dict, float, str]]):
+    """configs: list of (config_delta, priority, note)"""
+    with _conn() as con:
+        for delta, priority, note in configs:
+            fp = _config_fingerprint(delta)
+            completed = _count_completed_for_config(con, fp)
+            inflight = _count_inflight_for_config(con, fp)
+            total_planned = completed + inflight
+
+            desired = _desired_repeats(float(priority))
+            max_trials = min(MAX_TRIALS_PER_CONFIG, desired + 2)
+
+            # Avoid wasting resources on excessive duplicates.
+            if total_planned >= max_trials:
+                continue
+            if inflight >= MAX_INFLIGHT_PER_CONFIG:
+                continue
+            # Once we've reached desired repeats, trickle additional repeats only
+            # after current inflight copies finish (for controlled confidence growth).
+            if total_planned >= desired and inflight >= 1:
+                continue
+
+            con.execute("""
+                INSERT INTO config_queue (exp_id, config_delta, priority, note, status)
+                VALUES (?,?,?,?,'pending')
+            """, (str(uuid.uuid4()), fp, priority, note))
+
+
+def pop_next_config(worker_id: str) -> Optional[dict]:
+    """Atomically assign the highest-priority pending config to this worker."""
+    now = time.time()
+    # Expire old assigned configs (worker probably died)
+    expire_cutoff = now - 600  # 10 min
+    with _conn() as con:
+        con.execute("""
+            UPDATE config_queue SET status='pending', assigned_to=NULL, assigned_at=NULL
+            WHERE status='assigned' AND assigned_at < ?
+        """, (expire_cutoff,))
+        row = con.execute("""
+            SELECT exp_id, config_delta, priority, note
+            FROM config_queue
+            WHERE status='pending'
+            ORDER BY priority DESC
+            LIMIT 1
+        """).fetchone()
+        if row is None:
+            return None
+        con.execute("""
+            UPDATE config_queue
+            SET status='assigned', assigned_to=?, assigned_at=?
+            WHERE exp_id=?
+        """, (worker_id, now, row["exp_id"]))
+        return {
+            "exp_id": row["exp_id"],
+            "config_delta": json.loads(row["config_delta"]),
+            "priority": row["priority"],
+            "note": row["note"],
+        }
+
+
+def queue_depth() -> int:
+    with _conn() as con:
+        return con.execute(
+            "SELECT COUNT(*) FROM config_queue WHERE status='pending'"
+        ).fetchone()[0]
+
+
+# ── Dimensions ────────────────────────────────────────────────────────────────
+
+def get_dimensions() -> list[dict]:
+    with _conn() as con:
+        rows = con.execute("SELECT * FROM dimensions ORDER BY importance DESC").fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            if d["categories"]:
+                d["categories"] = json.loads(d["categories"])
+            if d["frozen_value"]:
+                d["frozen_value"] = json.loads(d["frozen_value"])
+            result.append(d)
+        return result
+
+
+def update_dimension_importance(name: str, importance: float, n_samples: int):
+    with _conn() as con:
+        con.execute("""
+            UPDATE dimensions SET importance=?, n_samples=?, updated_at=?
+            WHERE name=?
+        """, (importance, n_samples, time.time(), name))
+
+
+def freeze_dimension(name: str, value: Any):
+    with _conn() as con:
+        con.execute("""
+            UPDATE dimensions SET frozen=1, frozen_value=?, updated_at=?
+            WHERE name=?
+        """, (json.dumps(value), time.time(), name))
+
+
+# ── Program snapshots ─────────────────────────────────────────────────────────
+
+def save_program_snapshot(content: str, exp_count: int):
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO program_snapshots (snapshot_id, content, experiment_count, created_at)
+            VALUES (?,?,?,?)
+        """, (str(uuid.uuid4()), content, exp_count, time.time()))
+
+
+def latest_program_md() -> str:
+    with _conn() as con:
+        row = con.execute("""
+            SELECT content FROM program_snapshots
+            ORDER BY created_at DESC LIMIT 1
+        """).fetchone()
+    return row["content"] if row else _default_program_md()
+
+
+def _default_program_md() -> str:
+    return """# Bad PI — shared research program
+
+## Goal
+Minimize val_bpb on the nanochat training task within a fixed 5-minute compute budget.
+
+## Current strategy
+Explore all dimensions broadly. Bad PI will narrow the search space
+as results accumulate.
+
+## What to modify
+Only `train.py`. Bad PI will provide specific config deltas to apply.
+
+## Reporting
+After each run, report val_bpb and any observations about training stability,
+loss curves, or GPU utilization anomalies.
+"""

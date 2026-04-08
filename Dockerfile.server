@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY meta_server/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY meta_server/ ./meta_server/
+COPY shared/      ./shared/
+
+# DB lives in /app/data so it can be volume-mounted
+RUN mkdir -p /app/data
+ENV DB_PATH=/app/data/experiments.db
+
+CMD ["uvicorn", "meta_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
