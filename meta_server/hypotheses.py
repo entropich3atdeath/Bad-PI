@@ -900,3 +900,40 @@ def make_default_registry() -> HypothesisRegistry:
     for hdata in DEFAULT_HYPOTHESES:
         reg.add(Hypothesis(**hdata))
     return reg
+
+
+def make_registry_from_dimensions(dimensions: list[dict], metric_name: str = "val_bpb") -> HypothesisRegistry:
+    """
+    Build a fresh hypothesis registry directly from current schema dimensions.
+
+    This is used when starting a new project so hypothesis statements align with
+    the active search space instead of legacy defaults.
+    """
+    reg = HypothesisRegistry()
+    seen: set[str] = set()
+
+    for dim in dimensions:
+        name = str(dim.get("name", "")).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        dtype = str(dim.get("dtype", "")).lower()
+        htype = "comparative" if dtype == "categorical" else "positive"
+        statement = f"{name} matters for {metric_name}"
+
+        reg.add(Hypothesis(
+            statement=statement,
+            type=htype,
+            importance=0.55,
+            config_constraint={},
+            source="default",
+            phase="exploration",
+        ))
+
+    if not reg.active:
+        return make_default_registry()
+    return reg

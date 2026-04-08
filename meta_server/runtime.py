@@ -12,7 +12,12 @@ log = logging.getLogger(__name__)
 
 from . import program_writer, store
 from .belief_engine import engine as belief_engine
-from .hypotheses import Hypothesis, HypothesisRegistry, make_default_registry
+from .hypotheses import (
+    Hypothesis,
+    HypothesisRegistry,
+    make_default_registry,
+    make_registry_from_dimensions,
+)
 from .meta_log import MetaHypothesisLog
 from .pipeline import pipeline
 from .population_manager import PopulationManager, Population
@@ -34,7 +39,7 @@ class RuntimeState:
 
     def __init__(self, state_path: Path = RUNTIME_STATE_PATH):
         self.state_path = state_path
-        self.registry: HypothesisRegistry = make_default_registry()
+        self.registry: HypothesisRegistry = HypothesisRegistry()
         self.population_manager = PopulationManager()
         self.meta_log = MetaHypothesisLog()
         self.pending_new_hypotheses: list[dict] = []
@@ -46,6 +51,20 @@ class RuntimeState:
     def initialize(self):
         with self._lock:
             self._load_locked()
+            dimensions = store.get_dimensions()
+            is_new_project = store.experiment_count() == 0
+
+            # New-project bootstrap rule:
+            # start with an empty/stale registry reset, then seed from schema dims.
+            if is_new_project:
+                self.registry = make_registry_from_dimensions(dimensions)
+                self.pending_new_hypotheses = []
+
+            # Defensive fallback for old state files with empty registries.
+            if not self.registry.active and not self.registry.archived:
+                self.registry = make_registry_from_dimensions(dimensions)
+
+            # Last-resort fallback when dimensions table is empty/unavailable.
             if not self.registry.active and not self.registry.archived:
                 self.registry = make_default_registry()
             self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
