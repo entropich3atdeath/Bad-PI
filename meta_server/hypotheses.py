@@ -792,22 +792,21 @@ class HypothesisRegistry:
             }
 
         test_spec = proposal.get("test_spec")
-        if phase == "validation" and not test_spec:
+        if not test_spec:
             return {
                 "accepted": False,
-                "reason": "missing_test_spec_for_validation",
+                "reason": "missing_test_spec",
                 "registry_add": False,
                 "immediate_forced_pursuit": False,
             }
-        if test_spec is not None:
-            valid_spec, spec_reason = self._validate_test_spec(test_spec)
-            if not valid_spec:
-                return {
-                    "accepted": False,
-                    "reason": spec_reason,
-                    "registry_add": False,
-                    "immediate_forced_pursuit": False,
-                }
+        valid_spec, spec_reason = self._validate_test_spec(test_spec)
+        if not valid_spec:
+            return {
+                "accepted": False,
+                "reason": spec_reason,
+                "registry_add": False,
+                "immediate_forced_pursuit": False,
+            }
 
         return {
             "accepted": True,
