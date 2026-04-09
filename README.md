@@ -10,6 +10,48 @@ Developer smoke-test / regression guide: [dev_checklist_readme.md](dev_checklist
 
 ---
 
+## ⚠️ Critical contract: program.md template (read this first)
+
+Bad PI now assumes a **shared base template** and a **mutable live-update block** in `program.md`.
+
+This is required for coordinated worker behavior.
+
+### Required locations
+
+1. Meta-agent workspace root must contain [program.md](program.md) (or set `META_BASE_PROGRAM_MD_PATH`).
+2. Worker-side autoresearch folder should start with the same base `program.md` content.
+
+Workers use that base locally; the server sends updates only after the first generated update.
+
+### Required structure
+
+Your base [program.md](program.md) should include immutable charter text plus these markers:
+
+```md
+<!-- BAD_PI_MUTABLE_START -->
+... live update block (managed by Meta-PI) ...
+<!-- BAD_PI_MUTABLE_END -->
+```
+
+Behavior:
+- Everything **outside** the markers is treated as stable charter guidance.
+- Meta-PI rewrites only the mutable block when generating updates.
+- Workers check for updates every run and apply them only when digest/content changes.
+
+### Dimension inference cadence (important)
+
+- **One-time startup bootstrap:** on server initialization, Meta-PI can use base [program.md](program.md) + [meta_server/schema.sql](meta_server/schema.sql) + current dimensions to suggest missing structural dimensions (for example architecture axes).
+- **Later proposals only on stall:** after startup, new-dimension proposals are generated only when progress stalls (not on every mutable rewrite).
+- **Normal mutable rewrites:** routine `program.md` updates use evidence + current state; they do not repeatedly force a schema-wide dimension rewrite each cycle.
+
+### Why this matters
+
+The original standalone autoresearch flow assumes a mostly static `program.md`.
+This distributed Meta-PI flow depends on a stable base + controlled incremental updates,
+so all workers stay aligned while still receiving evolving instructions.
+
+---
+
 ## System architecture
 
 ![Coordination architecture](docs/architecture.svg)
@@ -536,7 +578,11 @@ Call this your **enroll token**.
 
 ```bash
 export META_ENROLL_TOKEN="PASTE_YOUR_TOKEN_HERE"
-export ANTHROPIC_API_KEY="sk-..."   # optional
+export BAD_PI_LLM_PROVIDER="auto"   # auto|anthropic|openai|gemini
+# Provide one key for your selected provider (or multiple if using auto)
+export ANTHROPIC_API_KEY="sk-..."    # optional
+export OPENAI_API_KEY="sk-..."       # optional
+export GEMINI_API_KEY="..."          # optional (or GOOGLE_API_KEY)
 docker compose up -d
 ```
 
@@ -545,6 +591,11 @@ If you are **not** using Docker:
 ```bash
 export META_ENROLL_TOKEN="PASTE_YOUR_TOKEN_HERE"
 pip install -r meta_server/requirements.txt
+# Optional provider selection + keys
+export BAD_PI_LLM_PROVIDER="auto"   # auto|anthropic|openai|gemini
+# export ANTHROPIC_API_KEY="sk-..."
+# export OPENAI_API_KEY="sk-..."
+# export GEMINI_API_KEY="..."       # or GOOGLE_API_KEY
 uvicorn meta_server.main:app --host 0.0.0.0 --port 8000
 ```
 
