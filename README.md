@@ -540,7 +540,7 @@ It shows:
 - current theory graph status mix
 - worker-facing `program_md` preview via `/sync/{worker_id}`
 
-Run it:
+### Running locally (organizer only)
 
 ```bash
 pip install -r dashboard/requirements.txt
@@ -548,6 +548,95 @@ streamlit run dashboard/app.py
 ```
 
 Then open the local URL printed by Streamlit (usually `http://localhost:8501`).
+
+**By default, the dashboard runs only on your local machine** and is intended for the organizer to monitor swarm health and belief evolution during active runs. Workers do **not** have access to it.
+
+### Deploying for team access (optional)
+
+To share the dashboard with your team, deploy it behind a reverse proxy with authentication:
+
+#### Option 1: Nginx + Basic Auth (simple)
+
+```bash
+# Install Nginx and create auth file
+sudo apt-get install nginx
+sudo htpasswd -c /etc/nginx/dashboard.htpasswd $USERNAME
+
+# Create /etc/nginx/sites-available/dashboard
+server {
+  listen 8501;
+  server_name _;
+  
+  auth_basic "Bad PI Dashboard";
+  auth_basic_user_file /etc/nginx/dashboard.htpasswd;
+  
+  location / {
+    proxy_pass http://127.0.0.1:8502;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+  }
+}
+
+# Enable and restart
+sudo ln -s /etc/nginx/sites-available/dashboard /etc/nginx/sites-enabled/
+sudo systemctl restart nginx
+
+# Run Streamlit on localhost:8502 (not exposed directly)
+streamlit run dashboard/app.py --server.port 8502 --server.address 127.0.0.1
+```
+
+Then access via `http://YOUR_VM_IP:8501` with credentials.
+
+#### Option 2: Docker + Environment Filtering
+
+Wrap the Streamlit app in a Docker container that runs behind your existing meta-agent proxy:
+
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY dashboard/requirements.txt .
+RUN pip install -r requirements.txt
+COPY dashboard/app.py .
+CMD ["streamlit", "run", "app.py", "--server.port", "8502", "--server.address", "0.0.0.0"]
+```
+
+Build and run:
+
+```bash
+docker build -f Dockerfile.dashboard -t badpi-dashboard .
+docker run -p 127.0.0.1:8502:8502 \
+  -e STREAMLIT_SERVER_PORT=8502 \
+  badpi-dashboard
+```
+
+Then proxy through Nginx as above (listen on 8501, proxy to 127.0.0.1:8502).
+
+#### Option 3: Restrict to worker token holders
+
+Modify [dashboard/app.py](dashboard/app.py) to check the `X-Worker-Token` header:
+
+```python
+import streamlit as st
+import os
+
+# At the top of app.py, before any other streamlit calls:
+if "REQUIRE_DASHBOARD_AUTH" in os.environ:
+    token = st.query_params.get("token", [""])[0]
+    valid_tokens = os.environ.get("DASHBOARD_TOKENS", "").split(",")
+    if token not in valid_tokens:
+        st.error("Invalid or missing dashboard token")
+        st.stop()
+```
+
+Then deploy with:
+
+```bash
+export REQUIRE_DASHBOARD_AUTH=1
+export DASHBOARD_TOKENS="token1,token2,token3"
+streamlit run dashboard/app.py
+```
+
+Workers would access via `http://YOUR_VM_IP:8501?token=TOKEN`.
 
 ---
 
