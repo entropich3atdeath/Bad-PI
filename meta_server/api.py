@@ -216,8 +216,18 @@ def submit_result(result: ExperimentResult, x_worker_token: Optional[str] = Head
     )
     total = store.experiment_count()
 
+    focused_hypothesis_id: Optional[str] = None
+    pop = runtime_state.get_worker_population(result.worker_id)
+    if pop:
+        focused_hypothesis_id = pop.hypothesis_id
+
     if not result.error:
-        runtime_state.handle_completed_experiment(result.config_delta, result.delta_bpb, total)
+        runtime_state.handle_completed_experiment(
+            result.config_delta,
+            result.delta_bpb,
+            total,
+            hypothesis_id=focused_hypothesis_id,
+        )
     else:
         belief_engine._completed_count = total
 
@@ -300,15 +310,29 @@ def leaderboard():
     """Public leaderboard — best delta_bpb per worker."""
     with store._conn() as con:
         rows = con.execute("""
+            WITH ranked AS (
+                SELECT
+                    e.worker_id,
+                    e.delta_bpb,
+                    e.config_delta,
+                    e.completed_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.worker_id
+                        ORDER BY e.delta_bpb ASC, e.completed_at DESC
+                    ) AS rn
+                FROM experiments e
+                WHERE e.status='completed'
+            )
             SELECT
-                w.worker_id, w.gpu_type, w.experiment_count,
-                MIN(e.delta_bpb) AS best_delta_bpb,
-                e.config_delta   AS best_config_delta
+                w.worker_id,
+                w.gpu_type,
+                w.experiment_count,
+                r.delta_bpb AS best_delta_bpb,
+                r.config_delta AS best_config_delta
             FROM workers w
-            JOIN experiments e ON e.worker_id = w.worker_id
-            WHERE e.status='completed'
-            GROUP BY w.worker_id
-            ORDER BY best_delta_bpb ASC
+            JOIN ranked r ON r.worker_id = w.worker_id
+            WHERE r.rn = 1
+            ORDER BY r.delta_bpb ASC
             LIMIT 50
         """).fetchall()
     return [

@@ -400,10 +400,21 @@ class RuntimeState:
                 return program_writer.compose_program_md(self.base_program_md, live), pop, hypothesis
             return store.latest_program_md(), pop, hypothesis
 
-    def handle_completed_experiment(self, config_delta: dict, delta_bpb: Optional[float], total_experiments: int):
+    def handle_completed_experiment(
+        self,
+        config_delta: dict,
+        delta_bpb: Optional[float],
+        total_experiments: int,
+        hypothesis_id: Optional[str] = None,
+    ):
         with self._lock:
             if delta_bpb is not None:
-                self.registry.ingest_experiment(config_delta, delta_bpb)
+                target_ids = {hypothesis_id} if hypothesis_id else None
+                self.registry.ingest_experiment(
+                    config_delta,
+                    delta_bpb,
+                    target_hypothesis_ids=target_ids,
+                )
 
             experiments = store.recent_experiments(1000)
             dimensions = store.get_dimensions()

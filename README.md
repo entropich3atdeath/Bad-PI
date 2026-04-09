@@ -529,6 +529,28 @@ The simulator uses a synthetic `simulate_metric(config, progress)` function that
 
 ---
 
+## Live dashboard (health + leaderboard + belief plots)
+
+An interactive dashboard is included at [dashboard/app.py](dashboard/app.py).
+
+It shows:
+- server health KPIs
+- leaderboard table
+- hypothesis posterior trajectories over time (during dashboard session)
+- current theory graph status mix
+- worker-facing `program_md` preview via `/sync/{worker_id}`
+
+Run it:
+
+```bash
+pip install -r dashboard/requirements.txt
+streamlit run dashboard/app.py
+```
+
+Then open the local URL printed by Streamlit (usually `http://localhost:8501`).
+
+---
+
 ## Quick start
 
 ### 1. Deploy the meta-agent (organiser only, once)

@@ -16,6 +16,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+import re
 from typing import Optional, Any
 import numpy as np
 from scipy import stats
@@ -462,23 +463,62 @@ class HypothesisRegistry:
 
         return {hs[i].id: int(counts[i]) for i in range(len(hs))}
 
-    def ingest_experiment(self, config_delta: dict, delta_bpb: float):
+    def ingest_experiment(
+        self,
+        config_delta: dict,
+        delta_bpb: float,
+        target_hypothesis_ids: Optional[set[str]] = None,
+    ):
         """
         Route an experiment result to relevant hypotheses and update beliefs.
         Simple routing: if a hypothesis has a config_constraint key present in
         config_delta, it's relevant.
         """
         for h in self.active:
+            if target_hypothesis_ids and h.id not in target_hypothesis_ids:
+                continue
             if h.phase == "validation" and h.test_spec:
                 # Validation hypotheses are updated on completed tests, not per-run.
                 continue
-            relevant = (
-                not h.config_constraint                          # global hypothesis
-                or any(k in config_delta for k in h.config_constraint)
-            )
+
+            # Primary relevance: explicit constraint keys.
+            if h.config_constraint:
+                relevant = any(k in config_delta for k in h.config_constraint)
+            else:
+                # Secondary relevance: infer focus dimensions from statement text
+                # for auto-generated hypotheses like "LR matters for val_bpb".
+                focus_dims = self._focus_dims_from_statement(h.statement)
+                relevant = (not focus_dims) or any(d in config_delta for d in focus_dims)
+
             if relevant and delta_bpb is not None:
                 h.update(delta_bpb, config_delta)
                 h.maybe_trigger_decision_sprint()
+
+    @staticmethod
+    def _focus_dims_from_statement(statement: str) -> set[str]:
+        """
+        Best-effort dimension extraction from hypothesis statement.
+
+        Supports patterns like:
+          - "LR matters for val_bpb"
+          - "A x B interact"
+          - "A × B interaction"
+        """
+        s = str(statement or "").strip()
+        if not s:
+            return set()
+
+        # Pattern: "DIM matters for ..."
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+matters\s+for\b", s, flags=re.IGNORECASE)
+        if m:
+            return {m.group(1)}
+
+        # Pattern: "A x B" or "A × B"
+        m2 = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*[x×]\s*([A-Za-z_][A-Za-z0-9_]*)", s)
+        if m2:
+            return {m2.group(1), m2.group(2)}
+
+        return set()
 
     @staticmethod
     def _parse_config_dict(exp: dict) -> dict:
@@ -847,6 +887,7 @@ class HypothesisRegistry:
                 "statement": h.statement,
                 "status": h.status,
                 "posterior": round(h.posterior, 4),
+                "n_experiments": h.n_experiments,
                 "effect_mu": round(h.effect_mu, 6),
                 "effect_sem": round(h.effect_sem, 6),
                 "parent_id": h.parent_id,
