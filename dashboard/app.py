@@ -40,12 +40,14 @@ def _safe_fetch(base_url: str) -> tuple[dict[str, Any], str | None]:
         health = _get_json(base_url, "/health")
         runs_stats = _get_json(base_url, "/runs/stats")
         leaderboard = _get_json(base_url, "/leaderboard")
+        populations = _get_json(base_url, "/populations")
         theory = _get_json(base_url, "/theory_graph")
         theory_human = _get_json(base_url, "/theory_graph/human?include_graph=true")
         return {
             "health": health,
             "runs_stats": runs_stats,
             "leaderboard": leaderboard if isinstance(leaderboard, list) else leaderboard.get("leaderboard", []),
+            "populations": populations.get("populations", []) if isinstance(populations, dict) else [],
             "theory": theory,
             "theory_human": theory_human,
             "fetched_at": time.time(),
@@ -169,6 +171,7 @@ def _sample_population_programs(base_url: str) -> tuple[list[dict[str, Any]], st
                     "program_digest": sync.get("program_digest"),
                     "sync_link": f"{base_url}/sync/{wid}",
                     "curl": f"curl -s -H 'X-Worker-Token: {token}' '{base_url}/sync/{wid}' | jq -r .program_md",
+                    "program_md_full": text,
                     "mutable_preview": "\n".join(mutable.splitlines()[:12]) if mutable else "",
                 }
             )
@@ -204,6 +207,7 @@ _record_snapshot(payload)
 health = payload["health"]
 runs_stats = payload["runs_stats"]
 leaderboard = payload["leaderboard"]
+populations = payload.get("populations", [])
 nodes = payload.get("theory", {}).get("nodes", [])
 status = _status_counts(nodes)
 
@@ -306,6 +310,12 @@ with c2:
     snapshot_rows = sorted(snapshot_rows, key=lambda r: r.get("posterior") or 0, reverse=True)
     st.dataframe(snapshot_rows, width="stretch", hide_index=True)
 
+st.subheader("Population allocation (preference view)")
+if populations:
+    st.dataframe(populations, width="stretch", hide_index=True)
+else:
+    st.info("No active population rows yet.")
+
 st.subheader("Theory graph summary")
 derived = payload.get("theory_human", {}).get("derived_layer", {})
 summary_text = derived.get("summary_text") or "(no summary)"
@@ -385,5 +395,7 @@ else:
             st.markdown(f"Sync endpoint: {p['sync_link']}")
             st.code(p.get("curl", ""), language="bash")
             st.code(p.get("mutable_preview", ""), language="markdown")
+            st.markdown("Full worker-facing program.md")
+            st.code(p.get("program_md_full", ""), language="markdown")
 
 st.caption(f"Server: {base_url} · snapshots tracked this session: {len(st.session_state.history)}")

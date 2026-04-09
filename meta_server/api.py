@@ -509,6 +509,28 @@ def get_meta_log():
     return runtime_state.meta_log.latest_markdown()
 
 
+@app.get("/populations")
+def get_populations():
+    """Current active populations and allocation targets."""
+    rows = []
+    for pop in runtime_state.population_manager.active_populations:
+        h = runtime_state.registry.get(pop.hypothesis_id)
+        rows.append({
+            "population_id": pop.id,
+            "hypothesis_id": pop.hypothesis_id,
+            "hypothesis_statement": h.statement if h else None,
+            "strategy": pop.strategy,
+            "target_workers": pop.target_workers,
+            "assigned_workers": len(pop.assigned_workers),
+            "posterior": round(h.posterior, 6) if h else None,
+            "information_value": round(h.information_value, 6) if h else None,
+            "n_experiments": h.n_experiments if h else None,
+            "status": h.status if h else None,
+        })
+    rows.sort(key=lambda r: (r.get("target_workers") or 0, r.get("posterior") or 0), reverse=True)
+    return {"count": len(rows), "populations": rows}
+
+
 @app.get("/theory_graph")
 def theory_graph():
     """Structured parent/child/link hypothesis graph for analysis tooling."""
