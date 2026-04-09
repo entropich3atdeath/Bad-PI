@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "experiments.db")))
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_BASE_PROGRAM_MD_PATH = WORKSPACE_ROOT / "program.md"
 
 # Duplicate-trial policy (confidence vs waste)
 MAX_TRIALS_PER_CONFIG = 6        # hard cap for any exact config
@@ -381,6 +383,12 @@ def save_program_snapshot(content: str, exp_count: int):
         """, (str(uuid.uuid4()), content, exp_count, time.time()))
 
 
+def has_program_snapshot() -> bool:
+    with _conn() as con:
+        row = con.execute("SELECT 1 FROM program_snapshots LIMIT 1").fetchone()
+    return row is not None
+
+
 def latest_program_md() -> str:
     with _conn() as con:
         row = con.execute("""
@@ -388,6 +396,27 @@ def latest_program_md() -> str:
             ORDER BY created_at DESC LIMIT 1
         """).fetchone()
     return row["content"] if row else _default_program_md()
+
+
+def load_base_program_md() -> str:
+    """
+    Canonical base template for this experiment.
+
+    Priority:
+      1) META_BASE_PROGRAM_MD_PATH (user-provided)
+      2) workspace-root program.md
+      3) built-in fallback template
+    """
+    raw = os.environ.get("META_BASE_PROGRAM_MD_PATH", "").strip()
+    path = Path(raw) if raw else DEFAULT_BASE_PROGRAM_MD_PATH
+    if path.exists() and path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except Exception:
+            pass
+    return _default_program_md()
 
 
 def _default_program_md() -> str:

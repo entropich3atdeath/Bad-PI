@@ -5,7 +5,8 @@ LLM translation layer — receives BeliefState from belief_engine.py and
 renders it into human-readable program.md and hypothesis proposals.
 
 SCHEMA ENFORCEMENT:
-  All LLM calls use Anthropic tool_use with a JSON schema.
+    All LLM calls use structured JSON generation validated by Pydantic.
+    Supported providers: Anthropic, OpenAI, Gemini (OpenAI-compatible endpoint).
   The LLM never returns freeform text directly.
   Output is validated as a Pydantic model before use.
   If validation fails → deterministic template fallback (no LLM retry loop).
@@ -29,10 +30,139 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 WRITE_EVERY = 50
+IMMUTABLE_START = "<!-- BAD_PI_IMMUTABLE_START -->"
+IMMUTABLE_END = "<!-- BAD_PI_IMMUTABLE_END -->"
+MUTABLE_START = "<!-- BAD_PI_MUTABLE_START -->"
+MUTABLE_END = "<!-- BAD_PI_MUTABLE_END -->"
 
 
 def should_write(total_experiments: int, last_written_at: int) -> bool:
     return (total_experiments - last_written_at) >= WRITE_EVERY
+
+
+def _resolve_llm_provider() -> str:
+    """
+    Resolve which provider to use for structured generation.
+
+    BAD_PI_LLM_PROVIDER: anthropic | openai | gemini | auto
+    auto priority: anthropic -> openai -> gemini
+    """
+    pref = str(os.environ.get("BAD_PI_LLM_PROVIDER", "auto") or "auto").strip().lower()
+    valid = {"anthropic", "openai", "gemini", "auto"}
+    if pref not in valid:
+        pref = "auto"
+
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_gemini = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+
+    if pref == "auto":
+        if has_anthropic:
+            return "anthropic"
+        if has_openai:
+            return "openai"
+        if has_gemini:
+            return "gemini"
+        raise RuntimeError("No LLM API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY/GOOGLE_API_KEY.")
+
+    if pref == "anthropic" and not has_anthropic:
+        raise RuntimeError("BAD_PI_LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set")
+    if pref == "openai" and not has_openai:
+        raise RuntimeError("BAD_PI_LLM_PROVIDER=openai but OPENAI_API_KEY is not set")
+    if pref == "gemini" and not has_gemini:
+        raise RuntimeError("BAD_PI_LLM_PROVIDER=gemini but GEMINI_API_KEY/GOOGLE_API_KEY is not set")
+    return pref
+
+
+def _structured_call(
+    *,
+    prompt: str,
+    model_cls: type[BaseModel],
+    anthropic_tool: dict,
+    max_tokens: int,
+) -> BaseModel:
+    """Provider-agnostic structured generation with schema validation."""
+    provider = _resolve_llm_provider()
+
+    if provider == "anthropic":
+        import anthropic
+
+        model_name = os.environ.get("BAD_PI_MODEL_ANTHROPIC", "claude-sonnet-4-20250514")
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=max_tokens,
+            tools=[anthropic_tool],
+            tool_choice={"type": "tool", "name": anthropic_tool["name"]},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        tool_block = next(b for b in response.content if b.type == "tool_use")
+        return model_cls.model_validate(tool_block.input)
+
+    # OpenAI + Gemini(openai-compatible endpoint)
+    from openai import OpenAI
+
+    if provider == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        model_name = os.environ.get("BAD_PI_MODEL_GEMINI", "gemini-2.0-flash")
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+    else:
+        model_name = os.environ.get("BAD_PI_MODEL_OPENAI", "gpt-4.1-mini")
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    schema_json = json.dumps(model_cls.model_json_schema(), indent=2)
+    prompt_with_schema = (
+        f"{prompt}\n\n"
+        "Return ONLY valid JSON matching this schema exactly.\n"
+        "No markdown, no prose, no code fences.\n"
+        f"JSON Schema:\n{schema_json}"
+    )
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt_with_schema}],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+    raw = completion.choices[0].message.content or "{}"
+    return model_cls.model_validate(json.loads(raw))
+
+
+def compose_program_md(base_template: Optional[str], live_update: str) -> str:
+    """
+    Compose final worker-facing program.md with immutable/mutable separation.
+
+    If mutable markers exist in base_template, only replace mutable block content.
+    Otherwise preserve the base template verbatim and append one live-update block.
+    """
+    if not base_template:
+        return live_update
+
+    base = str(base_template)
+    if MUTABLE_START in base and MUTABLE_END in base:
+        pre, rest = base.split(MUTABLE_START, 1)
+        _, post = rest.split(MUTABLE_END, 1)
+        return (
+            pre
+            + MUTABLE_START
+            + "\n"
+            + live_update.strip()
+            + "\n"
+            + MUTABLE_END
+            + post
+        )
+
+    # Backward-compatible fallback for templates without explicit markers.
+    return (
+        base.rstrip()
+        + "\n\n---\n"
+        + "## Meta-PI live update (auto-generated)\n"
+        + "\n"
+        + live_update.strip()
+        + "\n"
+    )
 
 
 # ── Output schemas ─────────────────────────────────────────────────────────────
@@ -115,7 +245,7 @@ class TheoryGraphSummaryOutput(BaseModel):
     caution: Optional[str] = Field(default=None, description="Optional caveat about uncertainty or sparse evidence")
 
 
-# ── Tool definitions (Anthropic tool_use schema) ──────────────────────────────
+# ── Structured tool schemas (provider-agnostic) ───────────────────────────────
 
 PROGRAM_MD_TOOL = {
     "name":        "write_program_md",
@@ -209,17 +339,21 @@ def render_program_md(out: ProgramMDOutput, bs: "BeliefState", active_workers: i
 
 # ── Main entry points ─────────────────────────────────────────────────────────
 
-def generate_program_md(bs: "BeliefState", active_workers: int) -> str:
+def generate_program_md(bs: "BeliefState", active_workers: int, base_template: Optional[str] = None) -> str:
     """
     Generate program.md via schema-enforced LLM call.
+    If base_template is provided, treat it as the canonical guidance document and
+    update instructions incrementally rather than rewriting from scratch.
     Falls back to deterministic template on any error.
     """
     try:
-        out = _call_program_md_tool(bs)
-        return render_program_md(out, bs, active_workers)
+        out = _call_program_md_tool(bs, base_template=base_template)
+        live = render_program_md(out, bs, active_workers)
+        return compose_program_md(base_template, live)
     except Exception as e:
         log.warning(f"program_md LLM call failed ({type(e).__name__}: {e}) — using template")
-        return _template_fallback(bs, active_workers)
+        live = _template_fallback(bs, active_workers)
+        return compose_program_md(base_template, live)
 
 
 def propose_new_hypotheses(bs: "BeliefState") -> list[HypothesisProposal]:
@@ -245,6 +379,30 @@ def propose_new_dimensions(bs: "BeliefState", existing_dim_names: list[str]) -> 
         return _call_dimension_tool(bs, existing_dim_names)
     except Exception as e:
         log.warning(f"dimension proposal failed ({type(e).__name__}: {e}) — skipping")
+        return []
+
+
+def propose_initial_dimensions(
+    *,
+    base_template: str,
+    existing_dimensions: list[dict],
+    schema_sql: str,
+) -> list[DimensionProposal]:
+    """
+    One-time startup pass.
+
+    Uses base program.md + current schema/dimensions to identify missing search axes,
+    especially architecture/model-family categorical dimensions when implied by the
+    experiment charter but not represented in the search space.
+    """
+    try:
+        return _call_initial_dimension_bootstrap_tool(
+            base_template=base_template,
+            existing_dimensions=existing_dimensions,
+            schema_sql=schema_sql,
+        )
+    except Exception as e:
+        log.warning(f"initial dimension bootstrap failed ({type(e).__name__}: {e}) — skipping")
         return []
 
 
@@ -341,91 +499,115 @@ def _build_math_context(bs: "BeliefState") -> str:
     return "\n".join(lines)
 
 
-def _call_program_md_tool(bs: "BeliefState") -> ProgramMDOutput:
-    import anthropic
-    client  = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+def _call_program_md_tool(bs: "BeliefState", base_template: Optional[str] = None) -> ProgramMDOutput:
     context = _build_math_context(bs)
-
-    response = client.messages.create(
-        model      = "claude-sonnet-4-20250514",
-        max_tokens = 1024,
-        tools      = [PROGRAM_MD_TOOL],
-        tool_choice= {"type": "tool", "name": "write_program_md"},
-        messages   = [{
-            "role":    "user",
-            "content": (
-                "You are translating mathematical output into research instructions.\n"
-                "DO NOT make decisions. Translate only what the math says.\n\n"
-                "Mathematical output from belief engine:\n\n"
-                f"{context}\n\n"
-                "Call write_program_md with your translation."
-            ),
-        }],
+    continuity_block = (
+        "\nCanonical base template (preserve intent/continuity; update only what evidence supports):\n\n"
+        f"{base_template}\n\n"
+        if base_template else ""
     )
 
-    # Extract tool_use block
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    return ProgramMDOutput.model_validate(tool_block.input)
+    prompt = (
+        "You are translating mathematical output into research instructions.\n"
+        "DO NOT make decisions. Translate only what the math says.\n\n"
+        "Treat the base template as the stable experiment charter and keep continuity across updates.\n"
+        "Do not discard valid standing instructions unless contradicted by evidence.\n\n"
+        f"{continuity_block}"
+        "Mathematical output from belief engine:\n\n"
+        f"{context}\n\n"
+        "Produce a JSON object for write_program_md."
+    )
+    out = _structured_call(
+        prompt=prompt,
+        model_cls=ProgramMDOutput,
+        anthropic_tool=PROGRAM_MD_TOOL,
+        max_tokens=1024,
+    )
+    return out
 
 
 def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
-    import anthropic
-    client  = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     context = _build_math_context(bs)
-
-    response = client.messages.create(
-        model      = "claude-sonnet-4-20250514",
-        max_tokens = 512,
-        tools      = [HYPOTHESIS_TOOL],
-        tool_choice= {"type": "tool", "name": "propose_hypotheses"},
-        messages   = [{
-            "role":    "user",
-            "content": (
-                "Based on these experiment results, propose 1-3 new hypotheses to test.\n"
-                "Base proposals ONLY on patterns visible in the data below.\n"
-                "IMPORTANT: Every hypothesis MUST include a test_spec — it defines how to falsify your claim.\n"
-                "phase=exploration: early-stage hypothesis, test_spec guides signal collection.\n"
-                "phase=validation: mature hypothesis, test_spec is strict experimental protocol.\n"
-                "Supported test_spec.type values: single_factor_effect, interaction_grid.\n"
-                "For single_factor_effect include {variable, values, min_runs_per_cell, decision_rule:{threshold}}.\n"
-                "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n\n"
-                f"{context}\n\n"
-                "Call propose_hypotheses with your proposals."
-            ),
-        }],
+    prompt = (
+        "Based on these experiment results, propose 1-3 new hypotheses to test.\n"
+        "Base proposals ONLY on patterns visible in the data below.\n"
+        "IMPORTANT: Every hypothesis MUST include a test_spec — it defines how to falsify your claim.\n"
+        "phase=exploration: early-stage hypothesis, test_spec guides signal collection.\n"
+        "phase=validation: mature hypothesis, test_spec is strict experimental protocol.\n"
+        "Supported test_spec.type values: single_factor_effect, interaction_grid.\n"
+        "For single_factor_effect include {variable, values, min_runs_per_cell, decision_rule:{threshold}}.\n"
+        "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n\n"
+        f"{context}\n\n"
+        "Produce a JSON object for propose_hypotheses."
     )
-
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    batch      = HypothesisProposalBatch.model_validate(tool_block.input)
+    batch = _structured_call(
+        prompt=prompt,
+        model_cls=HypothesisProposalBatch,
+        anthropic_tool=HYPOTHESIS_TOOL,
+        max_tokens=512,
+    )
     return batch.proposals
 
 
 def _call_dimension_tool(bs: "BeliefState", existing_dim_names: list[str]) -> list[DimensionProposal]:
-    import anthropic
-    client  = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     context = _build_math_context(bs)
-
-    response = client.messages.create(
-        model      = "claude-sonnet-4-20250514",
-        max_tokens = 512,
-        tools      = [DIMENSION_TOOL],
-        tool_choice= {"type": "tool", "name": "propose_new_dimensions"},
-        messages   = [{
-            "role":    "user",
-            "content": (
-                "The search has stalled — no meaningful improvement over the last 50 experiments.\n"
-                "Propose 1-3 NEW hyperparameters that are NOT in the current search space "
-                "and might unlock further improvement.\n\n"
-                f"Current search dimensions (DO NOT re-propose these): {existing_dim_names}\n\n"
-                "Experiment data:\n\n"
-                f"{context}\n\n"
-                "Call propose_new_dimensions with your proposals."
-            ),
-        }],
+    prompt = (
+        "The search has stalled — no meaningful improvement over the last 50 experiments.\n"
+        "Propose 1-3 NEW hyperparameters that are NOT in the current search space "
+        "and might unlock further improvement.\n\n"
+        f"Current search dimensions (DO NOT re-propose these): {existing_dim_names}\n\n"
+        "Experiment data:\n\n"
+        f"{context}\n\n"
+        "Produce a JSON object for propose_new_dimensions."
     )
+    batch = _structured_call(
+        prompt=prompt,
+        model_cls=DimensionProposalBatch,
+        anthropic_tool=DIMENSION_TOOL,
+        max_tokens=512,
+    )
+    return batch.proposals
 
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    batch      = DimensionProposalBatch.model_validate(tool_block.input)
+
+def _call_initial_dimension_bootstrap_tool(
+    *,
+    base_template: str,
+    existing_dimensions: list[dict],
+    schema_sql: str,
+) -> list[DimensionProposal]:
+    existing_summary = [
+        {
+            "name": d.get("name"),
+            "dtype": d.get("dtype"),
+            "categories": d.get("categories"),
+            "min_val": d.get("min_val"),
+            "max_val": d.get("max_val"),
+        }
+        for d in existing_dimensions
+    ]
+
+    prompt = (
+        "One-time startup analysis for a distributed research worker swarm.\n"
+        "Goal: detect missing search dimensions implied by the base experiment charter.\n"
+        "If architecture/model family is implied but no clean dimension exists, propose a categorical dimension\n"
+        "such as ARCH or MODEL_FAMILY with concrete categories (e.g. cnn, rnn, xgboost, random_forest) as appropriate.\n"
+        "Only propose dimensions that can be executed by changing train.py config constants.\n"
+        "Do NOT re-propose existing dimensions.\n"
+        "Output 0-3 proposals.\n\n"
+        "Base program.md template:\n\n"
+        f"{base_template}\n\n"
+        "Current dimensions (already present):\n"
+        f"{json.dumps(existing_summary, indent=2)}\n\n"
+        "schema.sql (for context):\n"
+        f"{schema_sql}\n\n"
+        "Produce a JSON object for propose_new_dimensions."
+    )
+    batch = _structured_call(
+        prompt=prompt,
+        model_cls=DimensionProposalBatch,
+        anthropic_tool=DIMENSION_TOOL,
+        max_tokens=700,
+    )
     return batch.proposals
 
 
@@ -437,9 +619,6 @@ def _render_theory_graph_summary(out: TheoryGraphSummaryOutput) -> str:
 
 
 def _call_theory_graph_tool(graph: dict) -> TheoryGraphSummaryOutput:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     nodes = list(graph.get("nodes", []))
     edges = list(graph.get("edges", []))
 
@@ -451,24 +630,19 @@ def _call_theory_graph_tool(graph: dict) -> TheoryGraphSummaryOutput:
         "counts": {"nodes": len(nodes), "edges": len(edges)},
     }
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=700,
-        tools=[THEORY_GRAPH_TOOL],
-        tool_choice={"type": "tool", "name": "summarize_theory_graph"},
-        messages=[{
-            "role": "user",
-            "content": (
-                "Summarize this hypothesis theory graph in plain English. "
-                "Do not invent data or claims.\n\n"
-                f"{json.dumps(compact_graph, indent=2)}\n\n"
-                "Call summarize_theory_graph with concise output."
-            ),
-        }],
+    prompt = (
+        "Summarize this hypothesis theory graph in plain English. "
+        "Do not invent data or claims.\n\n"
+        f"{json.dumps(compact_graph, indent=2)}\n\n"
+        "Produce a JSON object for summarize_theory_graph."
     )
-
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    return TheoryGraphSummaryOutput.model_validate(tool_block.input)
+    out = _structured_call(
+        prompt=prompt,
+        model_cls=TheoryGraphSummaryOutput,
+        anthropic_tool=THEORY_GRAPH_TOOL,
+        max_tokens=700,
+    )
+    return out
 
 
 def _template_theory_graph_summary(graph: dict) -> str:

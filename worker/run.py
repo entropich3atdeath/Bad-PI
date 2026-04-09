@@ -100,6 +100,7 @@ def run_loop(cfg: dict, max_runs: int | None = None, use_spec_pipeline: bool = F
 
     run_n = 0
     cached_spec_id = None
+    last_program_digest: str = ""
     while max_runs is None or run_n < max_runs:
         run_n += 1
         print(f"\n{'='*60}")
@@ -242,28 +243,38 @@ def run_loop(cfg: dict, max_runs: int | None = None, use_spec_pipeline: bool = F
         except Exception as e:
             print(f"  WARNING: could not submit result: {e}")
 
-        # 7. Sync program.md (every 5 runs)
-        if run_n % 5 == 0:
-            print("  → Syncing program.md…")
-            try:
-                state = sync(worker_id, worker_token)
+        # 7. Sync program.md (every run; rewrite only when digest changes)
+        print("  → Syncing program.md…")
+        try:
+            state = sync(worker_id, worker_token)
+            incoming_program = str(state.get("program_md") or "")
+            incoming_digest = str(state.get("program_digest") or "")
+
+            if incoming_program.strip() and incoming_digest and incoming_digest != last_program_digest:
                 prog_path = Path("program.md")
-                prog_path.write_text(state["program_md"])
-                frozen = [d for d in state["dimensions"] if d["frozen"]]
-                print(f"  Swarm: {state['experiment_count']} experiments · "
-                      f"{state['active_workers']} workers · {len(frozen)} frozen dims")
-                if state.get("population_id"):
-                    print(
-                        "  Assigned population: "
-                        f"{state['population_id']} · {state.get('population_strategy', 'investigate')}"
-                    )
-                if state.get("hypothesis_statement"):
-                    print(f"  Current hypothesis: {state['hypothesis_statement']}")
-                if state["top_configs"]:
-                    best = state["top_configs"][0]
-                    print(f"  Best ever: delta={best['delta_bpb']:+.4f}")
-            except Exception as e:
-                print(f"  WARNING: sync failed: {e}")
+                prog_path.write_text(incoming_program)
+                last_program_digest = incoming_digest
+                print(f"  program.md updated from agent (digest={incoming_digest}).")
+            elif not incoming_program.strip():
+                print("  No new program.md yet; keeping local base template.")
+            else:
+                print("  program.md unchanged.")
+
+            frozen = [d for d in state["dimensions"] if d["frozen"]]
+            print(f"  Swarm: {state['experiment_count']} experiments · "
+                  f"{state['active_workers']} workers · {len(frozen)} frozen dims")
+            if state.get("population_id"):
+                print(
+                    "  Assigned population: "
+                    f"{state['population_id']} · {state.get('population_strategy', 'investigate')}"
+                )
+            if state.get("hypothesis_statement"):
+                print(f"  Current hypothesis: {state['hypothesis_statement']}")
+            if state["top_configs"]:
+                best = state["top_configs"][0]
+                print(f"  Best ever: delta={best['delta_bpb']:+.4f}")
+        except Exception as e:
+            print(f"  WARNING: sync failed: {e}")
 
         print(f"  Done. Starting next run…")
         time.sleep(2)  # brief pause before next pull
