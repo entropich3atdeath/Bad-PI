@@ -273,18 +273,25 @@ def compute_belief_summary(
     interaction_hints: list[str] = []
     top10 = sorted(completed, key=lambda e: e["delta_bpb"])[:10]
     active_high_impact = [d for d in dim_findings if d.gap > 0.06][:3]
+    dim_lookup = {d["name"]: d for d in dimensions}
 
     if len(active_high_impact) >= 2 and len(top10) >= 5:
         # Find pairs that co-occur in top-10
         for i in range(len(active_high_impact)):
             for j in range(i + 1, len(active_high_impact)):
                 da, db = active_high_impact[i], active_high_impact[j]
+                da_dim = dim_lookup.get(da.dim_name)
+                db_dim = dim_lookup.get(db.dim_name)
+                if not da_dim or not db_dim:
+                    continue
+
                 co_count = sum(
-                    1 for exp in top10
+                    1
+                    for exp in top10
                     if (
-                        _bucket_label(_parse_config(exp).get(da.dim_name, ""), active_high_impact[i].__dict__) == da.best_range
-                        or _parse_config(exp).get(da.dim_name) is not None
-                    ) and _parse_config(exp).get(db.dim_name) is not None
+                        _bucket_label(_parse_config(exp).get(da.dim_name, ""), da_dim) == da.best_range
+                        and _bucket_label(_parse_config(exp).get(db.dim_name, ""), db_dim) == db.best_range
+                    )
                 )
                 if co_count >= 4:
                     interaction_hints.append(

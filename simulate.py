@@ -241,6 +241,7 @@ async def simulate_http_worker(
     n_rounds:   int = 3,
     enroll_token: str | None = None,
     trace: Optional[TraceLogger] = None,
+    loss_rate: float = 0.30,
 ):
     """Simulate a worker against the live HTTP meta-agent."""
     import aiohttp
@@ -260,28 +261,32 @@ async def simulate_http_worker(
                 "enroll_token": "present" if enroll_token else None,
             },
         )
-    async with session.post(f"{meta_url}/register", json={
-        "worker_id":    worker_id,
-        "gpu_type":     random.choice(["H100", "A100", "RTX3090"]),
-        "baseline_bpb": baseline_bpb,
-        "enroll_token": enroll_token,
-    }) as r:
-        if r.status != 200:
+    try:
+        async with session.post(f"{meta_url}/register", json={
+            "worker_id":    worker_id,
+            "gpu_type":     random.choice(["H100", "A100", "RTX3090"]),
+            "baseline_bpb": baseline_bpb,
+            "enroll_token": enroll_token,
+        }) as r:
+            if r.status != 200:
+                if trace:
+                    trace.log("http_register_failed", worker_id=worker_id, status=r.status)
+                print(f"  {worker_id} registration failed ({r.status})")
+                return
+            reg = await r.json()
+            worker_token = reg.get("worker_token")
             if trace:
-                trace.log("http_register_failed", worker_id=worker_id, status=r.status)
-            print(f"  {worker_id} registration failed ({r.status})")
-            return
-        reg = await r.json()
-        worker_token = reg.get("worker_token")
-        if trace:
-            trace.log(
-                "http_register_response",
-                worker_id=worker_id,
-                status=r.status,
-                message=reg.get("message"),
-                current_program_md=reg.get("current_program_md"),
-                worker_token=_redact_token(worker_token),
-            )
+                trace.log(
+                    "http_register_response",
+                    worker_id=worker_id,
+                    status=r.status,
+                    message=reg.get("message"),
+                    current_program_md=reg.get("current_program_md"),
+                    worker_token=_redact_token(worker_token),
+                )
+    except asyncio.TimeoutError:
+        print(f"  {worker_id} registration timeout")
+        return
 
     headers = {"X-Worker-Token": worker_token} if worker_token else {}
 
@@ -289,15 +294,21 @@ async def simulate_http_worker(
         # Get next config
         if trace:
             trace.log("http_next_config_request", worker_id=worker_id)
-        async with session.get(f"{meta_url}/next_config/{worker_id}", headers=headers) as r:
-            if r.status != 200:
+        try:
+            async with session.get(f"{meta_url}/next_config/{worker_id}", headers=headers) as r:
+                if r.status != 200:
+                    if trace:
+                        trace.log("http_next_config_failed", worker_id=worker_id, status=r.status)
+                    await asyncio.sleep(2)
+                    continue
+                task = await r.json()
                 if trace:
-                    trace.log("http_next_config_failed", worker_id=worker_id, status=r.status)
-                await asyncio.sleep(2)
-                continue
-            task = await r.json()
+                    trace.log("http_next_config_response", worker_id=worker_id, status=r.status, response=task)
+        except asyncio.TimeoutError:
             if trace:
-                trace.log("http_next_config_response", worker_id=worker_id, status=r.status, response=task)
+                trace.log("http_next_config_timeout", worker_id=worker_id)
+            await asyncio.sleep(1)
+            continue
 
         run_id = task["exp_id"]
         config = task["config_delta"]
@@ -346,6 +357,18 @@ async def simulate_http_worker(
             await asyncio.sleep(0.05)
 
         # Submit final result
+        # Inject mixed outcomes for belief-engine stress testing.
+        # loss  => delta_bpb >= 0 (worse than baseline)
+        # win   => delta_bpb < 0  (better than baseline)
+        if random.random() < loss_rate:
+            delta = abs(delta) + random.uniform(0.001, 0.03)
+            metric = baseline_bpb + delta
+            outcome = "loss"
+        else:
+            delta = -abs(delta)
+            metric = baseline_bpb + delta
+            outcome = "win"
+
         result_payload = {
             "worker_id":      worker_id,
             "exp_id":         run_id,
@@ -356,7 +379,7 @@ async def simulate_http_worker(
             "duration_seconds": 60,
         }
         if trace:
-            trace.log("http_result_request", worker_id=worker_id, run_id=run_id, payload=result_payload)
+            trace.log("http_result_request", worker_id=worker_id, run_id=run_id, outcome=outcome, payload=result_payload)
         async with session.post(f"{meta_url}/result", headers=headers, json=result_payload) as r:
             if trace:
                 try:
@@ -397,6 +420,8 @@ async def simulate_against_server(
     meta_url: str,
     enroll_token: str | None = None,
     trace: Optional[TraceLogger] = None,
+    loss_rate: float = 0.30,
+    max_concurrency: int = 20,
 ):
     try:
         import aiohttp
@@ -406,16 +431,35 @@ async def simulate_against_server(
 
     print(f"\nSimulating {n_workers} workers against {meta_url}")
     print(f"Rounds per worker: {n_rounds}")
+    print(f"Injected loss rate: {loss_rate:.0%}")
+    print(f"Max concurrent workers: {max_concurrency}")
     print("=" * 60)
     if trace:
-        trace.log("http_simulation_started", workers=n_workers, rounds=n_rounds, meta_url=meta_url)
+        trace.log("http_simulation_started", workers=n_workers, rounds=n_rounds, meta_url=meta_url, loss_rate=loss_rate)
 
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            simulate_http_worker(f"sim_{i:03d}", meta_url, session, n_rounds, enroll_token, trace)
-            for i in range(n_workers)
-        ]
-        await asyncio.gather(*tasks)
+    timeout = aiohttp.ClientTimeout(total=120, connect=30, sock_read=60)
+    connector = aiohttp.TCPConnector(limit=200)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        sem = asyncio.Semaphore(max(1, max_concurrency))
+
+        async def _run_one(i: int):
+            async with sem:
+                await asyncio.sleep(random.uniform(0.0, 0.25))
+                return await simulate_http_worker(
+                    f"sim_{i:03d}",
+                    meta_url,
+                    session,
+                    n_rounds,
+                    enroll_token,
+                    trace,
+                    loss_rate=loss_rate,
+                )
+
+        tasks = [_run_one(i) for i in range(n_workers)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures = sum(1 for r in results if isinstance(r, Exception))
+        if failures:
+            print(f"Workers with uncaught exceptions: {failures}")
 
     if trace:
         trace.log("http_simulation_complete", workers=n_workers, rounds=n_rounds, meta_url=meta_url)
@@ -431,6 +475,10 @@ def main():
     p.add_argument("--against-server", action="store_true")
     p.add_argument("--meta-url", default="http://localhost:8000")
     p.add_argument("--enroll-token", default=None)
+    p.add_argument("--loss-rate", type=float, default=0.30,
+                   help="Fraction of runs forced to be losses for belief-engine testing (0.0-1.0)")
+    p.add_argument("--max-concurrency", type=int, default=20,
+                   help="Cap on simultaneously active simulated workers to avoid request storms")
     p.add_argument("--trace-file", default=None,
                    help="Optional JSONL file to record simulation events and server responses")
     args = p.parse_args()
@@ -440,7 +488,17 @@ def main():
         print(f"Writing simulation trace to {trace.file_path}")
 
     if args.against_server:
-        asyncio.run(simulate_against_server(args.workers, args.rounds, args.meta_url, args.enroll_token, trace))
+        asyncio.run(
+            simulate_against_server(
+                args.workers,
+                args.rounds,
+                args.meta_url,
+                args.enroll_token,
+                trace,
+                loss_rate=max(0.0, min(1.0, args.loss_rate)),
+                max_concurrency=max(1, args.max_concurrency),
+            )
+        )
     else:
         asyncio.run(simulate_local(args.workers, args.rounds, trace))
 
