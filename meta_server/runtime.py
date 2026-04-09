@@ -56,6 +56,7 @@ class RuntimeState:
             self._load_locked()
             if not self.base_program_md:
                 self.base_program_md = store.load_base_program_md()
+            self._normalize_population_programs_locked()
             dimensions = store.get_dimensions()
             is_new_project = store.experiment_count() == 0
 
@@ -395,7 +396,8 @@ class RuntimeState:
                 # Server starts sending program updates only after first generated update.
                 return "", pop, hypothesis
             if pop and pop.program_md:
-                return pop.program_md, pop, hypothesis
+                live = self._extract_live_update_locked(pop.program_md)
+                return program_writer.compose_program_md(self.base_program_md, live), pop, hypothesis
             return store.latest_program_md(), pop, hypothesis
 
     def handle_completed_experiment(self, config_delta: dict, delta_bpb: Optional[float], total_experiments: int):
@@ -555,8 +557,33 @@ class RuntimeState:
             top_configs=self._top_configs_locked(5),
             dimensions=store.get_dimensions(),
         )
+        self._normalize_population_programs_locked()
         self._save_locked()
         return changes
+
+    @staticmethod
+    def _extract_live_update_locked(program_md: str) -> str:
+        text = str(program_md or "")
+        start = program_writer.MUTABLE_START
+        end = program_writer.MUTABLE_END
+        if start in text and end in text:
+            _, rest = text.split(start, 1)
+            live, _ = rest.split(end, 1)
+            return live.strip()
+        return text
+
+    def _normalize_population_programs_locked(self):
+        """
+        Ensure persisted population program content is always represented as the
+        mutable live-update block composed into the immutable base template.
+        """
+        if not self.base_program_md:
+            return
+        for pop in self.population_manager.active_populations:
+            if not pop.program_md:
+                continue
+            live = self._extract_live_update_locked(pop.program_md)
+            pop.program_md = program_writer.compose_program_md(self.base_program_md, live)
 
     def _load_locked(self):
         if not self.state_path.exists():
