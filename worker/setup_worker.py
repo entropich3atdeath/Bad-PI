@@ -165,9 +165,13 @@ def main():
         enroll_token=args.enroll_token,
     )
     print(f"  {resp['message']}")
-    print("\n--- program.md (current) ---")
-    print(resp["current_program_md"][:1000])
-    print("---\n")
+    current_program = str(resp.get("current_program_md") or "")
+    if current_program.strip():
+        print("\n--- program.md (current) ---")
+        print(current_program[:1000])
+        print("---\n")
+    else:
+        print("\nNo agent program update yet; workers will use local base program.md until first update.\n")
 
     # ── Check train.py for report() calls ────────────────────────────────
     _check_report_instrumentation(train_py)

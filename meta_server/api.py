@@ -3,6 +3,7 @@ meta_server/api.py
 FastAPI application — all HTTP endpoints workers talk to.
 """
 from __future__ import annotations
+import hashlib
 import json
 import logging
 import os
@@ -251,6 +252,10 @@ def sync(worker_id: str, x_worker_token: Optional[str] = Header(default=None)):
     """
     _require_worker_auth(worker_id, x_worker_token)
     program_md, pop, hypothesis = runtime_state.program_for_worker(worker_id)
+    program_digest = (
+        hashlib.sha256(program_md.encode("utf-8")).hexdigest()[:16]
+        if program_md else ""
+    )
     dims = store.get_dimensions()
     top = store.top_experiments(5)
     dim_statuses = [
@@ -276,6 +281,7 @@ def sync(worker_id: str, x_worker_token: Optional[str] = Header(default=None)):
     ]
     return ProgramSync(
         program_md=program_md,
+        program_digest=program_digest,
         dimensions=dim_statuses,
         top_configs=top_configs,
         experiment_count=store.experiment_count(),

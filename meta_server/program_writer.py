@@ -29,10 +29,49 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 WRITE_EVERY = 50
+IMMUTABLE_START = "<!-- BAD_PI_IMMUTABLE_START -->"
+IMMUTABLE_END = "<!-- BAD_PI_IMMUTABLE_END -->"
+MUTABLE_START = "<!-- BAD_PI_MUTABLE_START -->"
+MUTABLE_END = "<!-- BAD_PI_MUTABLE_END -->"
 
 
 def should_write(total_experiments: int, last_written_at: int) -> bool:
     return (total_experiments - last_written_at) >= WRITE_EVERY
+
+
+def compose_program_md(base_template: Optional[str], live_update: str) -> str:
+    """
+    Compose final worker-facing program.md with immutable/mutable separation.
+
+    If mutable markers exist in base_template, only replace mutable block content.
+    Otherwise preserve the base template verbatim and append one live-update block.
+    """
+    if not base_template:
+        return live_update
+
+    base = str(base_template)
+    if MUTABLE_START in base and MUTABLE_END in base:
+        pre, rest = base.split(MUTABLE_START, 1)
+        _, post = rest.split(MUTABLE_END, 1)
+        return (
+            pre
+            + MUTABLE_START
+            + "\n"
+            + live_update.strip()
+            + "\n"
+            + MUTABLE_END
+            + post
+        )
+
+    # Backward-compatible fallback for templates without explicit markers.
+    return (
+        base.rstrip()
+        + "\n\n---\n"
+        + "## Meta-PI live update (auto-generated)\n"
+        + "\n"
+        + live_update.strip()
+        + "\n"
+    )
 
 
 # ── Output schemas ─────────────────────────────────────────────────────────────
@@ -209,17 +248,21 @@ def render_program_md(out: ProgramMDOutput, bs: "BeliefState", active_workers: i
 
 # ── Main entry points ─────────────────────────────────────────────────────────
 
-def generate_program_md(bs: "BeliefState", active_workers: int) -> str:
+def generate_program_md(bs: "BeliefState", active_workers: int, base_template: Optional[str] = None) -> str:
     """
     Generate program.md via schema-enforced LLM call.
+    If base_template is provided, treat it as the canonical guidance document and
+    update instructions incrementally rather than rewriting from scratch.
     Falls back to deterministic template on any error.
     """
     try:
-        out = _call_program_md_tool(bs)
-        return render_program_md(out, bs, active_workers)
+        out = _call_program_md_tool(bs, base_template=base_template)
+        live = render_program_md(out, bs, active_workers)
+        return compose_program_md(base_template, live)
     except Exception as e:
         log.warning(f"program_md LLM call failed ({type(e).__name__}: {e}) — using template")
-        return _template_fallback(bs, active_workers)
+        live = _template_fallback(bs, active_workers)
+        return compose_program_md(base_template, live)
 
 
 def propose_new_hypotheses(bs: "BeliefState") -> list[HypothesisProposal]:
@@ -341,10 +384,15 @@ def _build_math_context(bs: "BeliefState") -> str:
     return "\n".join(lines)
 
 
-def _call_program_md_tool(bs: "BeliefState") -> ProgramMDOutput:
+def _call_program_md_tool(bs: "BeliefState", base_template: Optional[str] = None) -> ProgramMDOutput:
     import anthropic
     client  = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     context = _build_math_context(bs)
+    continuity_block = (
+        "\nCanonical base template (preserve intent/continuity; update only what evidence supports):\n\n"
+        f"{base_template}\n\n"
+        if base_template else ""
+    )
 
     response = client.messages.create(
         model      = "claude-sonnet-4-20250514",
@@ -356,6 +404,9 @@ def _call_program_md_tool(bs: "BeliefState") -> ProgramMDOutput:
             "content": (
                 "You are translating mathematical output into research instructions.\n"
                 "DO NOT make decisions. Translate only what the math says.\n\n"
+                "Treat the base template as the stable experiment charter and keep continuity across updates.\n"
+                "Do not discard valid standing instructions unless contradicted by evidence.\n\n"
+                f"{continuity_block}"
                 "Mathematical output from belief engine:\n\n"
                 f"{context}\n\n"
                 "Call write_program_md with your translation."

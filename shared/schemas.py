@@ -66,6 +66,7 @@ class DimensionStatus(BaseModel):
 
 class ProgramSync(BaseModel):
     program_md: str
+    program_digest: str = ""
     dimensions: list[DimensionStatus]
     top_configs: list[dict]         # top-5 (config_delta, mean_delta_bpb)
     experiment_count: int

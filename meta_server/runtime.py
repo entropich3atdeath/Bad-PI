@@ -42,6 +42,8 @@ class RuntimeState:
         self.registry: HypothesisRegistry = HypothesisRegistry()
         self.population_manager = PopulationManager()
         self.meta_log = MetaHypothesisLog()
+        self.base_program_md: str = ""
+        self.program_update_ready: bool = False
         self.pending_new_hypotheses: list[dict] = []
         self.pending_dimension_proposals: list[dict] = []   # LLM dim proposals when stalled
         self.dimension_signal_counts: dict[str, int] = {}
@@ -51,6 +53,8 @@ class RuntimeState:
     def initialize(self):
         with self._lock:
             self._load_locked()
+            if not self.base_program_md:
+                self.base_program_md = store.load_base_program_md()
             dimensions = store.get_dimensions()
             is_new_project = store.experiment_count() == 0
 
@@ -290,6 +294,10 @@ class RuntimeState:
         with self._lock:
             pop = self.assign_worker(worker_id)
             hypothesis = self.registry.get(pop.hypothesis_id) if pop else None
+            if not self.program_update_ready:
+                # Workers are expected to start from their local base program.md.
+                # Server starts sending program updates only after first generated update.
+                return "", pop, hypothesis
             if pop and pop.program_md:
                 return pop.program_md, pop, hypothesis
             return store.latest_program_md(), pop, hypothesis
@@ -348,8 +356,13 @@ class RuntimeState:
             winner = self.registry.convergence_winner()
             belief_state.is_converging = winner is not None
 
-            content = program_writer.generate_program_md(belief_state, store.active_worker_count())
+            content = program_writer.generate_program_md(
+                belief_state,
+                store.active_worker_count(),
+                base_template=self.base_program_md,
+            )
             store.save_program_snapshot(content, total_experiments)
+            self.program_update_ready = True
 
             proposals = program_writer.propose_new_hypotheses(belief_state)
             proposal_payloads = [
@@ -461,11 +474,15 @@ class RuntimeState:
         self.pending_dimension_proposals = list(data.get("pending_dimension_proposals", []))
         self.dimension_signal_counts = dict(data.get("dimension_signal_counts", {}))
         self.canary_dimensions = dict(data.get("canary_dimensions", {}))
+        self.base_program_md = str(data.get("base_program_md", "") or "")
+        self.program_update_ready = bool(data.get("program_update_ready", False))
 
     def _save_locked(self):
         payload = {
             "registry": self.registry.to_dict(),
             "population_manager": self.population_manager.to_dict(),
+            "base_program_md": self.base_program_md,
+            "program_update_ready": self.program_update_ready,
             "pending_new_hypotheses": self.pending_new_hypotheses,
             "pending_dimension_proposals": self.pending_dimension_proposals,
             "dimension_signal_counts": self.dimension_signal_counts,
