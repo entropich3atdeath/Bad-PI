@@ -46,9 +46,7 @@ CREATE TABLE IF NOT EXISTS dimensions (
     n_samples        INTEGER DEFAULT 0,  -- how many experiments touched this dim
     updated_at       REAL,
     is_canary        INTEGER DEFAULT 0,
-    canary_prob      REAL DEFAULT 1.0,
-    dim_role         TEXT DEFAULT 'variable',  -- 'core' | 'variable'
-    programme_label  TEXT DEFAULT NULL         -- optional: scope variable dim to a programme label
+    canary_prob      REAL DEFAULT 1.0
 );
 
 -- ── Suggested config queue ────────────────────────────────────────────────────
@@ -87,11 +85,11 @@ CREATE TABLE IF NOT EXISTS program_snapshots (
 -- Each row is a tunable hyperparameter in train.py.
 INSERT OR IGNORE INTO dimensions
     (name, dtype, min_val, max_val, log_scale, categories, frozen, frozen_value,
-     importance, n_samples, updated_at, is_canary, canary_prob, dim_role, programme_label)
+     importance, n_samples, updated_at, is_canary, canary_prob)
 VALUES
-    ('OPTIMIZER',    'categorical', NULL, NULL, 0, '["adam", "sgd"]',           0, NULL, 0.5, 0, 0, 0, 1.0, 'core',     NULL),
-    ('LR',           'float_log',   1e-4, 1e-1, 1, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0, 'variable', NULL),
-    ('BATCH_SIZE',   'categorical', NULL, NULL, 0, '[16, 32, 64, 128, 256]',    0, NULL, 0.5, 0, 0, 0, 1.0, 'variable', NULL),
-    ('HIDDEN_SIZE',  'int',         32,   512,  0, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0, 'variable', NULL),
-    ('N_LAYERS',     'int',         1,    5,    0, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0, 'variable', NULL),
-    ('WEIGHT_DECAY', 'float_log',   1e-6, 1e-1, 1, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0, 'variable', NULL);
+    ('LR',           'float_log',   1e-4, 1e-1, 1, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('BATCH_SIZE',   'categorical', NULL, NULL, 0, '[16, 32, 64, 128, 256]',    0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('HIDDEN_SIZE',  'int',         32,   512,  0, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('N_LAYERS',     'int',         1,    5,    0, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('WEIGHT_DECAY', 'float_log',   1e-6, 1e-1, 1, NULL,                        0, NULL, 0.5, 0, 0, 0, 1.0),
+    ('OPTIMIZER',    'categorical', NULL, NULL, 0, '["adam", "sgd"]',           0, NULL, 0.5, 0, 0, 0, 1.0);

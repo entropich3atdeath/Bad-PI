@@ -44,6 +44,7 @@ class RuntimeState:
         self.meta_log = MetaHypothesisLog()
         self.base_program_md: str = ""
         self.program_update_ready: bool = False
+        self.initial_dimension_bootstrap_done: bool = False
         self.pending_new_hypotheses: list[dict] = []
         self.pending_dimension_proposals: list[dict] = []   # LLM dim proposals when stalled
         self.dimension_signal_counts: dict[str, int] = {}
@@ -71,7 +72,102 @@ class RuntimeState:
             # Last-resort fallback when dimensions table is empty/unavailable.
             if not self.registry.active and not self.registry.archived:
                 self.registry = make_default_registry()
+
+            # One-time startup pass: use base template + schema to suggest missing
+            # dimensions (e.g. architecture/model-family axis) when not explicit.
+            bootstrap_adopted = self._run_initial_dimension_bootstrap_locked(dimensions)
+            if bootstrap_adopted > 0 and is_new_project:
+                # Keep initial hypotheses aligned with newly adopted dimensions.
+                self.registry = make_registry_from_dimensions(store.get_dimensions())
+
             self._refresh_populations_locked(total_workers=max(store.active_worker_count(), 1))
+
+    @staticmethod
+    def _has_architecture_axis(dimensions: list[dict]) -> bool:
+        """Heuristic guard so startup bootstrap only runs when architecture axis is unclear."""
+        name_tokens = {
+            "arch", "architecture", "model", "model_type", "model_family", "estimator", "backbone"
+        }
+        arch_values = {
+            "cnn", "rnn", "lstm", "gru", "transformer", "mlp",
+            "xgboost", "random_forest", "rf", "svm", "logistic_regression", "resnet",
+        }
+        for d in dimensions:
+            name = str(d.get("name", "")).strip().lower()
+            if name in name_tokens:
+                return True
+            if str(d.get("dtype", "")).strip().lower() == "categorical":
+                cats = d.get("categories") or []
+                cat_set = {str(c).strip().lower() for c in cats}
+                if len(cat_set.intersection(arch_values)) >= 2:
+                    return True
+        return False
+
+    def _run_initial_dimension_bootstrap_locked(self, dimensions: list[dict]) -> int:
+        """
+        One-time pass at startup to infer missing dimensions from base template + schema.
+        Returns number of adopted dimensions.
+        """
+        if self.initial_dimension_bootstrap_done:
+            return 0
+
+        try:
+            if self._has_architecture_axis(dimensions):
+                self.initial_dimension_bootstrap_done = True
+                self._save_locked()
+                return 0
+
+            schema_sql = ""
+            try:
+                schema_sql = store.SCHEMA_PATH.read_text(encoding="utf-8")
+            except Exception:
+                schema_sql = ""
+
+            proposals = program_writer.propose_initial_dimensions(
+                base_template=self.base_program_md,
+                existing_dimensions=dimensions,
+                schema_sql=schema_sql,
+            )
+            if not proposals:
+                self.initial_dimension_bootstrap_done = True
+                self._save_locked()
+                return 0
+
+            serialized = [
+                p.model_dump() if hasattr(p, "model_dump") else p.dict()
+                for p in proposals
+            ]
+
+            adopted_count = 0
+            total_experiments = store.experiment_count()
+            for p in serialized:
+                p["source"] = "initial_dimension_bootstrap"
+                valid, reason = self._validate_dimension_proposal_bounds(p)
+                p["adoption_eligible"] = bool(valid)
+
+                if valid:
+                    adopted, adopt_reason = self._adopt_dimension_locked(p, total_experiments)
+                    p["adopted"] = adopted
+                    p["adoption_reason"] = adopt_reason
+                    if adopted:
+                        adopted_count += 1
+                else:
+                    p["adopted"] = False
+                    p["adoption_reason"] = reason
+
+            self.pending_dimension_proposals.extend(serialized)
+            self.initial_dimension_bootstrap_done = True
+            self._save_locked()
+            log.info(
+                f"Initial dimension bootstrap: {len(serialized)} proposed, {adopted_count} adopted"
+            )
+            return adopted_count
+
+        except Exception as e:
+            log.warning(f"Initial dimension bootstrap error ({type(e).__name__}: {e})")
+            self.initial_dimension_bootstrap_done = True
+            self._save_locked()
+            return 0
 
     def build_belief_state(self):
         with self._lock:
@@ -476,6 +572,7 @@ class RuntimeState:
         self.canary_dimensions = dict(data.get("canary_dimensions", {}))
         self.base_program_md = str(data.get("base_program_md", "") or "")
         self.program_update_ready = bool(data.get("program_update_ready", False))
+        self.initial_dimension_bootstrap_done = bool(data.get("initial_dimension_bootstrap_done", False))
 
     def _save_locked(self):
         payload = {
@@ -483,6 +580,7 @@ class RuntimeState:
             "population_manager": self.population_manager.to_dict(),
             "base_program_md": self.base_program_md,
             "program_update_ready": self.program_update_ready,
+            "initial_dimension_bootstrap_done": self.initial_dimension_bootstrap_done,
             "pending_new_hypotheses": self.pending_new_hypotheses,
             "pending_dimension_proposals": self.pending_dimension_proposals,
             "dimension_signal_counts": self.dimension_signal_counts,
