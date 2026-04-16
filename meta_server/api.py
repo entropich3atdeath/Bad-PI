@@ -12,7 +12,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 # Allow running from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,14 +21,14 @@ import asyncio
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from shared.schemas import (
     RegisterRequest, RegisterResponse,
     ExperimentResult, NextConfig, NextConfigBatch,
     ProgramSync, DimensionStatus, LeaderboardEntry,
     StartRunRequest, LeaseCancelRequest,
 )
-from . import store, search, program_writer
+from . import store, search, program_writer, shadow
 from .scheduler import registry as run_registry
 from .pipeline  import pipeline
 from .belief_engine import engine as belief_engine
@@ -42,6 +42,21 @@ class Tick(BaseModel):
     p:  float        # progress 0.0–1.0 (fraction of 5-min budget elapsed)
     m:  float        # current metric (val_bpb or equivalent)
     d:  float        # delta = m - worker_baseline
+
+
+class ShadowHypothesisCreateRequest(BaseModel):
+    statement: str
+    config_constraint: dict[str, Any] = Field(default_factory=dict)
+    support_delta_lte: float = -0.001
+    refute_delta_gte: float = 0.001
+    name: Optional[str] = None
+    created_by: Optional[str] = None
+    active: bool = True
+    backfill_limit: int = 5000
+
+
+class ShadowHypothesisArchiveRequest(BaseModel):
+    active: bool = False
 
 log = logging.getLogger(__name__)
 _last_program_write = 0
@@ -304,6 +319,16 @@ def submit_result(result: ExperimentResult, x_worker_token: Optional[str] = Head
     )
     total = store.experiment_count()
 
+    shadow.evaluate_experiment_for_active_hypotheses(
+        {
+            "exp_id": result.exp_id,
+            "worker_id": result.worker_id,
+            "config_delta": result.config_delta,
+            "delta_bpb": result.delta_bpb,
+            "val_bpb": result.val_bpb,
+        }
+    )
+
     focused_hypothesis_id: Optional[str] = None
     pop = runtime_state.get_worker_population(result.worker_id)
     if pop:
@@ -337,6 +362,77 @@ def submit_result(result: ExperimentResult, x_worker_token: Optional[str] = Head
         pipeline.on_batch_complete(recent_metrics, runtime_state.registry)
 
     return {"ok": True, "total_experiments": total}
+
+
+# ── Shadow hypotheses + scorecards ───────────────────────────────────────────
+
+@app.get("/shadow/hypotheses")
+def list_shadow_hypotheses(active_only: bool = False):
+    rows = store.list_shadow_hypotheses(active_only=active_only)
+    return {
+        "count": len(rows),
+        "hypotheses": rows,
+    }
+
+
+@app.post("/shadow/hypotheses")
+def create_shadow_hypothesis(req: ShadowHypothesisCreateRequest):
+    if req.support_delta_lte >= req.refute_delta_gte:
+        raise HTTPException(400, "support_delta_lte must be < refute_delta_gte")
+
+    h = store.create_shadow_hypothesis(
+        statement=req.statement.strip(),
+        config_constraint=dict(req.config_constraint or {}),
+        support_delta_lte=req.support_delta_lte,
+        refute_delta_gte=req.refute_delta_gte,
+        name=req.name,
+        created_by=req.created_by,
+        active=req.active,
+    )
+
+    backfill = shadow.backfill(limit=req.backfill_limit) if req.active else {
+        "ok": True,
+        "considered_experiments": 0,
+        "matched_runs": 0,
+        "evidence_rows_touched": 0,
+    }
+    return {"ok": True, "hypothesis": h, "backfill": backfill}
+
+
+@app.post("/shadow/hypotheses/{hypothesis_id}/archive")
+def archive_shadow_hypothesis(hypothesis_id: str, req: ShadowHypothesisArchiveRequest):
+    ok = store.set_shadow_hypothesis_active(hypothesis_id, active=bool(req.active))
+    if not ok:
+        raise HTTPException(404, "Shadow hypothesis not found")
+    h = store.get_shadow_hypothesis(hypothesis_id)
+    return {"ok": True, "hypothesis": h}
+
+
+@app.get("/shadow/scorecards")
+def shadow_scorecards():
+    cards = store.shadow_scorecards()
+    return {
+        "count": len(cards),
+        "scorecards": cards,
+    }
+
+
+@app.get("/shadow/evidence/{hypothesis_id}")
+def shadow_evidence(hypothesis_id: str, limit: int = 200):
+    h = store.get_shadow_hypothesis(hypothesis_id)
+    if not h:
+        raise HTTPException(404, "Shadow hypothesis not found")
+    rows = store.shadow_evidence_for_hypothesis(hypothesis_id, limit=limit)
+    return {
+        "hypothesis": h,
+        "count": len(rows),
+        "rows": rows,
+    }
+
+
+@app.post("/shadow/backfill")
+def shadow_backfill(limit: int = 5000):
+    return shadow.backfill(limit=limit)
 
 
 # ── Program sync ──────────────────────────────────────────────────────────────

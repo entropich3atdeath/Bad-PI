@@ -81,6 +81,38 @@ CREATE TABLE IF NOT EXISTS program_snapshots (
     created_at       REAL NOT NULL
 );
 
+-- ── Shadow hypotheses (observational scoring) ───────────────────────────────
+CREATE TABLE IF NOT EXISTS shadow_hypotheses (
+    id                TEXT PRIMARY KEY,
+    name              TEXT,
+    statement         TEXT NOT NULL,
+    config_constraint TEXT NOT NULL,      -- JSON exact-match predicate over config_delta
+    support_delta_lte REAL NOT NULL DEFAULT -0.001,
+    refute_delta_gte  REAL NOT NULL DEFAULT 0.001,
+    active            INTEGER NOT NULL DEFAULT 1,
+    created_by        TEXT,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_hyp_active ON shadow_hypotheses(active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS shadow_evidence (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    hypothesis_id TEXT NOT NULL,
+    exp_id        TEXT NOT NULL,
+    worker_id     TEXT,
+    verdict       TEXT NOT NULL,          -- support | refute | inconclusive
+    delta_bpb     REAL,
+    val_bpb       REAL,
+    reason        TEXT,
+    created_at    REAL NOT NULL,
+    UNIQUE(hypothesis_id, exp_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_evidence_hyp ON shadow_evidence(hypothesis_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shadow_evidence_exp ON shadow_evidence(exp_id);
+
 -- ── Seed initial search space dimensions (MNIST digits classifier) ────────────
 -- Each row is a tunable hyperparameter in train.py.
 INSERT OR IGNORE INTO dimensions

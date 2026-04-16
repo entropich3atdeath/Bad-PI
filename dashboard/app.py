@@ -43,6 +43,7 @@ def _safe_fetch(base_url: str) -> tuple[dict[str, Any], str | None]:
         populations = _get_json(base_url, "/populations")
         theory = _get_json(base_url, "/theory_graph")
         theory_human = _get_json(base_url, "/theory_graph/human?include_graph=true")
+        shadow = _get_json(base_url, "/shadow/scorecards")
         return {
             "health": health,
             "runs_stats": runs_stats,
@@ -50,6 +51,7 @@ def _safe_fetch(base_url: str) -> tuple[dict[str, Any], str | None]:
             "populations": populations.get("populations", []) if isinstance(populations, dict) else [],
             "theory": theory,
             "theory_human": theory_human,
+            "shadow_scorecards": shadow.get("scorecards", []) if isinstance(shadow, dict) else [],
             "fetched_at": time.time(),
         }, None
     except urllib.error.HTTPError as e:
@@ -209,6 +211,7 @@ runs_stats = payload["runs_stats"]
 leaderboard = payload["leaderboard"]
 populations = payload.get("populations", [])
 nodes = payload.get("theory", {}).get("nodes", [])
+shadow_scorecards = payload.get("shadow_scorecards", [])
 status = _status_counts(nodes)
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -315,6 +318,12 @@ if populations:
     st.dataframe(populations, width="stretch", hide_index=True)
 else:
     st.info("No active population rows yet.")
+
+st.subheader("Shadow hypothesis scorecards")
+if shadow_scorecards:
+    st.dataframe(shadow_scorecards, width="stretch", hide_index=True)
+else:
+    st.info("No shadow hypotheses yet. Add one via /shadow/hypotheses.")
 
 st.subheader("Theory graph summary")
 derived = payload.get("theory_human", {}).get("derived_layer", {})

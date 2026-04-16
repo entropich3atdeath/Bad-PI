@@ -168,6 +168,15 @@ def top_experiments(n: int = 10) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_experiment(exp_id: str) -> Optional[dict]:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM experiments WHERE exp_id=?",
+            (exp_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 # ── Config queue ──────────────────────────────────────────────────────────────
 
 def _config_fingerprint(delta: dict) -> str:
@@ -446,6 +455,211 @@ def freeze_dimension(name: str, value: Any):
             UPDATE dimensions SET frozen=1, frozen_value=?, updated_at=?
             WHERE name=?
         """, (json.dumps(value), time.time(), name))
+
+
+def unfreeze_dimension(name: str):
+    with _conn() as con:
+        con.execute(
+            """
+            UPDATE dimensions SET frozen=0, frozen_value=NULL, updated_at=?
+            WHERE name=?
+            """,
+            (time.time(), name),
+        )
+
+
+# ── Shadow hypotheses / scorecards ────────────────────────────────────────────
+
+def create_shadow_hypothesis(
+    *,
+    statement: str,
+    config_constraint: dict,
+    support_delta_lte: float = -0.001,
+    refute_delta_gte: float = 0.001,
+    name: Optional[str] = None,
+    created_by: Optional[str] = None,
+    active: bool = True,
+) -> dict:
+    now = time.time()
+    hid = str(uuid.uuid4())[:8]
+    with _conn() as con:
+        con.execute(
+            """
+            INSERT INTO shadow_hypotheses
+            (id, name, statement, config_constraint, support_delta_lte, refute_delta_gte,
+             active, created_by, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                hid,
+                name,
+                statement,
+                _config_fingerprint(config_constraint or {}),
+                float(support_delta_lte),
+                float(refute_delta_gte),
+                1 if active else 0,
+                created_by,
+                now,
+                now,
+            ),
+        )
+    return get_shadow_hypothesis(hid) or {}
+
+
+def get_shadow_hypothesis(hypothesis_id: str) -> Optional[dict]:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM shadow_hypotheses WHERE id=?",
+            (hypothesis_id,),
+        ).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out["config_constraint"] = json.loads(out.get("config_constraint") or "{}")
+    out["active"] = bool(out.get("active", 0))
+    return out
+
+
+def list_shadow_hypotheses(active_only: bool = False) -> list[dict]:
+    with _conn() as con:
+        if active_only:
+            rows = con.execute(
+                """
+                SELECT * FROM shadow_hypotheses
+                WHERE active=1
+                ORDER BY updated_at DESC, created_at DESC
+                """
+            ).fetchall()
+        else:
+            rows = con.execute(
+                """
+                SELECT * FROM shadow_hypotheses
+                ORDER BY active DESC, updated_at DESC, created_at DESC
+                """
+            ).fetchall()
+
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["config_constraint"] = json.loads(item.get("config_constraint") or "{}")
+        item["active"] = bool(item.get("active", 0))
+        out.append(item)
+    return out
+
+
+def set_shadow_hypothesis_active(hypothesis_id: str, active: bool) -> bool:
+    with _conn() as con:
+        con.execute(
+            """
+            UPDATE shadow_hypotheses
+            SET active=?, updated_at=?
+            WHERE id=?
+            """,
+            (1 if active else 0, time.time(), hypothesis_id),
+        )
+        row = con.execute("SELECT 1 FROM shadow_hypotheses WHERE id=?", (hypothesis_id,)).fetchone()
+    return row is not None
+
+
+def upsert_shadow_evidence(
+    *,
+    hypothesis_id: str,
+    exp_id: str,
+    worker_id: str,
+    verdict: str,
+    delta_bpb: Optional[float],
+    val_bpb: Optional[float],
+    reason: str,
+) -> dict:
+    now = time.time()
+    with _conn() as con:
+        con.execute(
+            """
+            INSERT INTO shadow_evidence
+            (hypothesis_id, exp_id, worker_id, verdict, delta_bpb, val_bpb, reason, created_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(hypothesis_id, exp_id) DO UPDATE SET
+                worker_id=excluded.worker_id,
+                verdict=excluded.verdict,
+                delta_bpb=excluded.delta_bpb,
+                val_bpb=excluded.val_bpb,
+                reason=excluded.reason,
+                created_at=excluded.created_at
+            """,
+            (hypothesis_id, exp_id, worker_id, verdict, delta_bpb, val_bpb, reason, now),
+        )
+        row = con.execute(
+            """
+            SELECT * FROM shadow_evidence
+            WHERE hypothesis_id=? AND exp_id=?
+            """,
+            (hypothesis_id, exp_id),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def shadow_scorecards() -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            """
+            SELECT
+                h.id,
+                h.name,
+                h.statement,
+                h.config_constraint,
+                h.support_delta_lte,
+                h.refute_delta_gte,
+                h.active,
+                h.created_at,
+                h.updated_at,
+                COUNT(e.id) AS evidence_count,
+                SUM(CASE WHEN e.verdict='support' THEN 1 ELSE 0 END) AS support_count,
+                SUM(CASE WHEN e.verdict='refute' THEN 1 ELSE 0 END) AS refute_count,
+                SUM(CASE WHEN e.verdict='inconclusive' THEN 1 ELSE 0 END) AS inconclusive_count,
+                AVG(e.delta_bpb) AS mean_delta_bpb,
+                MIN(e.delta_bpb) AS best_delta_bpb,
+                MAX(e.delta_bpb) AS worst_delta_bpb,
+                MAX(e.created_at) AS last_evidence_at
+            FROM shadow_hypotheses h
+            LEFT JOIN shadow_evidence e ON e.hypothesis_id = h.id
+            GROUP BY h.id
+            ORDER BY h.active DESC, evidence_count DESC, h.updated_at DESC
+            """
+        ).fetchall()
+
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["config_constraint"] = json.loads(item.get("config_constraint") or "{}")
+        item["active"] = bool(item.get("active", 0))
+        evidence_count = int(item.get("evidence_count") or 0)
+        support = int(item.get("support_count") or 0)
+        refute = int(item.get("refute_count") or 0)
+        inconclusive = int(item.get("inconclusive_count") or 0)
+        item["support_count"] = support
+        item["refute_count"] = refute
+        item["inconclusive_count"] = inconclusive
+        item["evidence_count"] = evidence_count
+        item["support_rate"] = round((support / evidence_count), 4) if evidence_count else None
+        item["refute_rate"] = round((refute / evidence_count), 4) if evidence_count else None
+        item["net_score"] = round(((support - refute) / evidence_count), 4) if evidence_count else None
+        out.append(item)
+    return out
+
+
+def shadow_evidence_for_hypothesis(hypothesis_id: str, limit: int = 200) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            """
+            SELECT *
+            FROM shadow_evidence
+            WHERE hypothesis_id=?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (hypothesis_id, max(1, int(limit or 1))),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Program snapshots ─────────────────────────────────────────────────────────

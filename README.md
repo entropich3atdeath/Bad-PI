@@ -258,6 +258,30 @@ The server now maintains a persistent runtime state (`meta_server/runtime.py`) t
 9. **Checkpoints** the meta-hypothesis log every 100 experiments.
 10. **Persists** all state to `runtime_state.json` (path configurable via `META_RUNTIME_STATE_PATH`).
 
+---
+
+## Shadow hypotheses + scorecards (observational mode)
+
+Bad PI now supports **shadow hypotheses**: hypotheses that are *not* controlling assignment,
+but are continuously scored from naturally occurring runs whenever the run config matches
+the hypothesis constraint.
+
+Each matched run is labeled:
+- `support` if `delta_bpb <= support_delta_lte`
+- `refute` if `delta_bpb >= refute_delta_gte`
+- `inconclusive` otherwise
+
+New endpoints:
+
+- `POST /shadow/hypotheses` — create a shadow hypothesis (optionally backfills recent runs)
+- `GET /shadow/hypotheses` — list shadow hypotheses
+- `POST /shadow/hypotheses/{hypothesis_id}/archive` — toggle active/inactive
+- `GET /shadow/scorecards` — aggregate scorecards (support/refute/inconclusive counts + rates)
+- `GET /shadow/evidence/{hypothesis_id}` — inspect matched evidence rows
+- `POST /shadow/backfill` — recompute evidence over recent completed runs
+
+Scorecards are also visible in the dashboard under **Shadow hypothesis scorecards**.
+
 ### What workers see in `next_config` (population-aware)
 
 ```json

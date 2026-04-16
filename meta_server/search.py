@@ -120,6 +120,10 @@ class ThompsonSampler:
         delta = {}
         score_sum = 0.0
         active_dims = [d for d in dims if not d["frozen"] and d["importance"] > 0.05]
+        # Fallback: if every dimension is currently low-importance, still sample
+        # from unfrozen dimensions so the queue never degenerates to empty config {}.
+        if not active_dims:
+            active_dims = [d for d in dims if not d["frozen"]]
 
         for dim in active_dims:
             name = dim["name"]
@@ -329,6 +333,18 @@ def run_search_cycle():
     4. Refill the config queue
     """
     dims = store.get_dimensions()
+
+    # Recovery guard: if all dimensions are frozen, unfreeze a minimal set so
+    # the search can continue and workers receive non-empty config deltas.
+    if dims and all(bool(d["frozen"]) for d in dims):
+        rescue = sorted(dims, key=lambda d: float(d.get("importance") or 0.0), reverse=True)[:2]
+        for d in rescue:
+            store.unfreeze_dimension(d["name"])
+        log.warning(
+            "Search space collapsed (all dims frozen); unfroze %s",
+            ", ".join(d["name"] for d in rescue),
+        )
+        dims = store.get_dimensions()
     experiments = store.recent_experiments(1000)
     total = store.experiment_count()
 
@@ -338,6 +354,7 @@ def run_search_cycle():
     # 2. fANOVA
     if total >= fanova.MIN_SAMPLES:
         importance = fanova.run(experiments, dims)
+        unfrozen_names = {d["name"] for d in dims if not d["frozen"]}
         for name, score in importance.items():
             n_samples = sum(
                 1 for e in experiments
@@ -347,12 +364,16 @@ def run_search_cycle():
             # Freeze if importance is very low and we have enough data
             if (total >= MIN_EXPERIMENTS_FREEZE
                     and score < FREEZE_THRESHOLD
-                    and not any(d["frozen"] and d["name"] == name for d in dims)):
+                    and name in unfrozen_names):
+                # Safety guard: never freeze everything; keep at least two active dims.
+                if len(unfrozen_names) <= 2:
+                    continue
                 # Find the best value for this dimension
                 best_val = _best_value_for_dim(name, experiments)
                 if best_val is not None:
                     log.info(f"Freezing {name}={best_val} (importance={score:.3f})")
                     store.freeze_dimension(name, best_val)
+                    unfrozen_names.discard(name)
 
     # Reload dims after potential freezes
     dims = store.get_dimensions()
