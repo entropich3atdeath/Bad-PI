@@ -267,6 +267,81 @@ def pop_next_config(worker_id: str) -> Optional[dict]:
         }
 
 
+def pop_next_configs(worker_id: str, limit: int) -> list[dict]:
+    """Atomically assign up to `limit` highest-priority pending configs to this worker."""
+    now = time.time()
+    expire_cutoff = now - 600  # 10 min
+    requested = max(1, int(limit or 1))
+    with _conn() as con:
+        con.execute(
+            """
+            UPDATE config_queue SET status='pending', assigned_to=NULL, assigned_at=NULL
+            WHERE status='assigned' AND assigned_at < ?
+            """,
+            (expire_cutoff,),
+        )
+        rows = con.execute(
+            """
+            SELECT exp_id, config_delta, priority, note
+            FROM config_queue
+            WHERE status='pending'
+            ORDER BY priority DESC
+            LIMIT ?
+            """,
+            (requested,),
+        ).fetchall()
+        if not rows:
+            return []
+
+        claimed: list[dict] = []
+        for row in rows:
+            con.execute(
+                """
+                UPDATE config_queue
+                SET status='assigned', assigned_to=?, assigned_at=?
+                WHERE exp_id=?
+                """,
+                (worker_id, now, row["exp_id"]),
+            )
+            claimed.append(
+                {
+                    "exp_id": row["exp_id"],
+                    "config_delta": json.loads(row["config_delta"]),
+                    "priority": row["priority"],
+                    "note": row["note"],
+                }
+            )
+        return claimed
+
+
+def release_assigned_configs(worker_id: str, exp_ids: list[str]) -> list[str]:
+    """Release worker-owned assigned configs back to the pending queue."""
+    if not exp_ids:
+        return []
+    released: list[str] = []
+    with _conn() as con:
+        for exp_id in exp_ids:
+            row = con.execute(
+                """
+                SELECT exp_id FROM config_queue
+                WHERE exp_id=? AND status='assigned' AND assigned_to=?
+                """,
+                (exp_id, worker_id),
+            ).fetchone()
+            if row is None:
+                continue
+            con.execute(
+                """
+                UPDATE config_queue
+                SET status='pending', assigned_to=NULL, assigned_at=NULL
+                WHERE exp_id=?
+                """,
+                (exp_id,),
+            )
+            released.append(exp_id)
+    return released
+
+
 def queue_depth() -> int:
     with _conn() as con:
         return con.execute(

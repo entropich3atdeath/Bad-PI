@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -23,8 +24,9 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from shared.schemas import (
     RegisterRequest, RegisterResponse,
-    ExperimentResult, NextConfig,
+    ExperimentResult, NextConfig, NextConfigBatch,
     ProgramSync, DimensionStatus, LeaderboardEntry,
+    StartRunRequest, LeaseCancelRequest,
 )
 from . import store, search, program_writer
 from .scheduler import registry as run_registry
@@ -63,6 +65,82 @@ def _require_run_auth(run_id: str, x_worker_token: Optional[str]) -> str:
         raise HTTPException(401, "Unknown or inactive run.")
     _require_worker_auth(run.worker_id, x_worker_token)
     return run.worker_id
+
+
+def _worker_assignment_snapshot(worker_id: str) -> dict:
+    program_md, pop, hypothesis = runtime_state.program_for_worker(worker_id)
+    program_digest = (
+        hashlib.sha256(program_md.encode("utf-8")).hexdigest()[:16]
+        if program_md else ""
+    )
+    return {
+        "program_digest": program_digest,
+        "population_id": pop.id if pop else None,
+        "population_strategy": pop.strategy if pop else None,
+        "hypothesis_id": hypothesis.id if hypothesis else None,
+        "hypothesis_statement": hypothesis.statement if hypothesis else None,
+    }
+
+
+def _claim_single_config(worker_id: str) -> Optional[dict]:
+    config = store.pop_next_config(worker_id)
+    if config is None:
+        search.run_search_cycle()
+        config = store.pop_next_config(worker_id)
+    return config
+
+
+def _claim_config_batch(worker_id: str, limit: int) -> list[dict]:
+    configs = store.pop_next_configs(worker_id, limit)
+    if not configs:
+        search.run_search_cycle()
+        configs = store.pop_next_configs(worker_id, limit)
+    return configs
+
+
+def _build_next_config_response(
+    worker_id: str,
+    config: dict,
+    *,
+    batch_id: Optional[str] = None,
+    lease_id: Optional[str] = None,
+    activate_run: bool = True,
+) -> NextConfig:
+    shaped = runtime_state.shape_config_for_worker(worker_id, config)
+
+    pop_strategy = shaped.get("_population_strategy", "investigate")
+    pop_id = shaped.get("_population_id", "default")
+    budget = belief_engine.decide_budget(
+        population_strategy=pop_strategy,
+        hypothesis_posterior=float(shaped.get("_hypothesis_posterior", 0.5)),
+        queue_depth=store.queue_depth(),
+    )
+
+    if activate_run:
+        run_registry.start_run(
+            worker_id=worker_id,
+            config_delta=shaped["config_delta"],
+            population_id=pop_id,
+            budget=budget,
+            run_id=shaped["exp_id"],
+        )
+
+    shaped.setdefault("note", "")
+    shaped["note"] = f"{pop_strategy} — {budget}s budget"
+
+    return NextConfig(
+        exp_id=shaped["exp_id"],
+        config_delta=shaped["config_delta"],
+        budget_seconds=budget,
+        priority=shaped.get("priority", 0.5),
+        note=shaped["note"],
+        lease_id=lease_id or shaped["exp_id"],
+        batch_id=batch_id,
+        population_id=shaped.get("_population_id"),
+        population_strategy=shaped.get("_population_strategy"),
+        hypothesis_id=shaped.get("_hypothesis_id"),
+        hypothesis_statement=shaped.get("_hypothesis_statement"),
+    )
 
 
 # ── Background tasks ──────────────────────────────────────────────────────────
@@ -147,46 +225,56 @@ def next_config(worker_id: str, x_worker_token: Optional[str] = Header(default=N
         raise HTTPException(400, "Worker not registered. Call /register first.")
     _require_worker_auth(worker_id, x_worker_token)
     store.touch_worker(worker_id)
-    config = store.pop_next_config(worker_id)
-    if config is None:
-        search.run_search_cycle()
-        config = store.pop_next_config(worker_id)
+    config = _claim_single_config(worker_id)
     if config is None:
         raise HTTPException(503, "Config queue empty, retry in 10s")
 
-    config = runtime_state.shape_config_for_worker(worker_id, config)
+    return _build_next_config_response(worker_id, config, activate_run=True)
 
-    # Decide budget based on population strategy and hypothesis certainty
-    pop_strategy = config.get("_population_strategy", "investigate")
-    pop_id = config.get("_population_id", "default")
-    budget = belief_engine.decide_budget(
-        population_strategy  = pop_strategy,
-        hypothesis_posterior = float(config.get("_hypothesis_posterior", 0.5)),
-        queue_depth          = store.queue_depth(),
-    )
 
-    # Register run lifecycle using the same exp_id workers will report/tick with.
-    run_registry.start_run(
+@app.get("/next_config_batch/{worker_id}", response_model=NextConfigBatch)
+def next_config_batch(
+    worker_id: str,
+    n: int = 3,
+    x_worker_token: Optional[str] = Header(default=None),
+):
+    """
+    Lease a small batch of upcoming configs to reduce control-plane overhead.
+    Runs are activated explicitly by the worker just before execution.
+    """
+    worker = store.get_worker(worker_id)
+    if not worker:
+        raise HTTPException(400, "Worker not registered. Call /register first.")
+    _require_worker_auth(worker_id, x_worker_token)
+    store.touch_worker(worker_id)
+
+    requested = max(1, min(int(n or 1), 3))
+    configs = _claim_config_batch(worker_id, requested)
+    if not configs:
+        raise HTTPException(503, "Config queue empty, retry in 10s")
+
+    batch_id = str(uuid.uuid4())[:8]
+    snapshot = _worker_assignment_snapshot(worker_id)
+    items = [
+        _build_next_config_response(
+            worker_id,
+            config,
+            batch_id=batch_id,
+            lease_id=config["exp_id"],
+            activate_run=False,
+        )
+        for config in configs
+    ]
+    first = items[0]
+    return NextConfigBatch(
         worker_id=worker_id,
-        config_delta=config["config_delta"],
-        population_id=pop_id,
-        budget=budget,
-        run_id=config["exp_id"],
-    )
-
-    config.setdefault("note", "")
-    config["note"] = f"{pop_strategy} — {budget}s budget"
-
-    return NextConfig(
-        exp_id         = config["exp_id"],
-        config_delta   = config["config_delta"],
-        budget_seconds = budget,
-        priority       = config.get("priority", 0.5),
-        note           = config["note"],
-        population_id  = config.get("_population_id"),
-        population_strategy = config.get("_population_strategy"),
-        hypothesis_id  = config.get("_hypothesis_id"),
-        hypothesis_statement = config.get("_hypothesis_statement"),
+        batch_id=batch_id,
+        program_digest=snapshot["program_digest"],
+        population_id=first.population_id,
+        population_strategy=first.population_strategy,
+        hypothesis_id=first.hypothesis_id,
+        hypothesis_statement=first.hypothesis_statement,
+        configs=items,
     )
 
 
@@ -401,8 +489,7 @@ async def tick(t: Tick, x_worker_token: Optional[str] = Header(default=None)):
 @app.post("/runs/start/{worker_id}")
 def start_run(
     worker_id: str,
-    config_delta: dict = None,
-    population_id: str = "default",
+    req: StartRunRequest,
     x_worker_token: Optional[str] = Header(default=None),
 ):
     """
@@ -414,11 +501,27 @@ def start_run(
         raise HTTPException(400, "Worker not registered.")
     _require_worker_auth(worker_id, x_worker_token)
     run = run_registry.start_run(
-        worker_id     = worker_id,
-        config_delta  = config_delta or {},
-        population_id = population_id,
+        worker_id=worker_id,
+        config_delta=req.config_delta or {},
+        population_id=req.population_id,
+        budget=req.budget_seconds,
+        run_id=req.run_id,
     )
     return {"run_id": run.id, "budget_seconds": run.budget_seconds}
+
+
+@app.post("/leases/cancel")
+def cancel_leases(req: LeaseCancelRequest, x_worker_token: Optional[str] = Header(default=None)):
+    """Release unstarted leased configs when worker state changes mid-batch."""
+    worker = store.get_worker(req.worker_id)
+    if not worker:
+        raise HTTPException(400, "Worker not registered.")
+    _require_worker_auth(req.worker_id, x_worker_token)
+    released = store.release_assigned_configs(req.worker_id, req.lease_ids)
+    reason = req.reason or "lease_canceled"
+    for lease_id in released:
+        run_registry.stop_run(lease_id, reason=reason)
+    return {"ok": True, "released": released, "released_count": len(released)}
 
 
 @app.delete("/runs/{run_id}")

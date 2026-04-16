@@ -46,10 +46,36 @@ class NextConfig(BaseModel):
     budget_seconds: int = 300       # how long this run should train — agent-controlled
     priority: float                 # 0-1, informational
     note: str = ""                  # human-readable reason ("exploit pop A, 360s")
+    lease_id: Optional[str] = None
+    batch_id: Optional[str] = None
     population_id: Optional[str] = None
     population_strategy: Optional[str] = None
     hypothesis_id: Optional[str] = None
     hypothesis_statement: Optional[str] = None
+
+
+class NextConfigBatch(BaseModel):
+    worker_id: str
+    batch_id: str
+    program_digest: str = ""
+    population_id: Optional[str] = None
+    population_strategy: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+    hypothesis_statement: Optional[str] = None
+    configs: list[NextConfig]
+
+
+class StartRunRequest(BaseModel):
+    config_delta: dict[str, Any] = Field(default_factory=dict)
+    population_id: str = "default"
+    run_id: Optional[str] = None
+    budget_seconds: int = 300
+
+
+class LeaseCancelRequest(BaseModel):
+    worker_id: str
+    lease_ids: list[str]
+    reason: Optional[str] = None
 
 
 # ── Dimension status (server → worker, in program.md sync) ────────────────────

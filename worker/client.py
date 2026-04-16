@@ -60,6 +60,59 @@ def get_next_config(worker_id: str, worker_token: Optional[str], retries: int = 
     raise RuntimeError("Could not get next config after retries")
 
 
+def get_next_config_batch(
+    worker_id: str,
+    worker_token: Optional[str],
+    n: int = 3,
+    retries: int = 5,
+) -> dict:
+    for attempt in range(retries):
+        try:
+            r = requests.get(
+                _url(f"/next_config_batch/{worker_id}"),
+                params={"n": n},
+                headers=_auth_headers(worker_token),
+                timeout=TIMEOUT,
+            )
+            if r.status_code == 503:
+                print(f"  Queue empty, retrying in 15s… ({attempt+1}/{retries})")
+                time.sleep(15)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            if attempt == retries - 1:
+                raise
+            print(f"  Network error ({e}), retrying in 10s…")
+            time.sleep(10)
+    raise RuntimeError("Could not get next config batch after retries")
+
+
+def start_run(
+    worker_id: str,
+    worker_token: Optional[str],
+    *,
+    config_delta: dict,
+    population_id: str,
+    run_id: str,
+    budget_seconds: int,
+) -> dict:
+    payload = {
+        "config_delta": config_delta,
+        "population_id": population_id,
+        "run_id": run_id,
+        "budget_seconds": budget_seconds,
+    }
+    r = requests.post(
+        _url(f"/runs/start/{worker_id}"),
+        json=payload,
+        headers=_auth_headers(worker_token),
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def submit_result(
     worker_id: str,
     worker_token: Optional[str],
@@ -88,6 +141,22 @@ def submit_result(
 
 def sync(worker_id: str, worker_token: Optional[str]) -> dict:
     r = requests.get(_url(f"/sync/{worker_id}"), headers=_auth_headers(worker_token), timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
+def cancel_leases(
+    worker_id: str,
+    worker_token: Optional[str],
+    lease_ids: list[str],
+    reason: str = "state_changed",
+) -> dict:
+    r = requests.post(
+        _url("/leases/cancel"),
+        json={"worker_id": worker_id, "lease_ids": lease_ids, "reason": reason},
+        headers=_auth_headers(worker_token),
+        timeout=TIMEOUT,
+    )
     r.raise_for_status()
     return r.json()
 
