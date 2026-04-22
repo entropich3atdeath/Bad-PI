@@ -6,6 +6,27 @@ Autoresearch by yourself is great. Autoresearch with friends is better!!
 
 1000+ workers, each running 5-minute training experiments on their own GPU, coordinated by **Bad PI**: maintaining scientific hypotheses, updating beliefs from evidence, eliminating bad ideas deliberately, and continuously narrowing the search space.
 
+## Bad PI as science, not just search
+
+Bad PI is built to do science in a decentralized way. It is a framework for any lab, team, or laptop-based researcher to run a collective research process with the same structure as a good experimental lab.
+
+Think about what a good research lab does:
+- start with a huge space of things that could be true,
+- form falsifiable hypotheses,
+- design controlled experiments to test them,
+- update beliefs based on evidence,
+- kill dead ends decisively,
+- accumulate institutional knowledge in a notebook,
+- and allocate the best people to the most uncertain, highest-impact questions.
+
+That's it. That's all of science. That's exactly what Bad PI does, mechanically.
+
+The hypothesis registry is the lab's whiteboard of active research questions. The Beta-Binomial belief updates are what a good scientist does intuitively: after enough experiments, you start to believe a path is dead and stop wasting resources on it. Falsification runs are the most important part — a bad lab never kills ideas, a good lab deliberately designs experiments to disprove its own beliefs. The population system is a department chair allocating graduate students and compute to the right questions. The meta-hypothesis log is literally a lab notebook.
+
+Bad PI shrinks the search space by discovery. A typical optimizer may still be sampling from the full space after thousands of trials. Bad PI can discover that a dimension is irrelevant, archive a refuted hypothesis, and free workers to focus on the remaining structure. After hundreds of experiments, the system may be searching a tiny subspace of what started as a much larger space. That is not only optimization — that is discovery.
+
+**This is also a way to democratize research. Science and its benefits should not be locked behind massive datacenters with the compute haves. With Bad PI, the rest of us can still participate: your laptop can be a worker, your team can run experiments on modest hardware, and the system still produces the same scientific structure, evidence trail, and hypotheses. It's power to the people!!**
+
 Developer smoke-test / regression guide: [dev_checklist_readme.md](dev_checklist_readme.md)
 
 ---
