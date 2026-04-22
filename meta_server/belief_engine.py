@@ -653,13 +653,13 @@ class FunctionalANOVA:
 class BetaBinomial:
     """
     Exact Bayesian update for binary hypotheses.
-    Prior: Beta(alpha_0, beta_0) — defaults to Beta(2,2) (mildly uncertain, centered P=0.5)
+    Prior: Beta(alpha_0, beta_0) — defaults to Beta(2.5,2.5) (slightly stronger, centered P=0.5)
     After k wins in n trials: posterior Beta(alpha_0+k, beta_0+(n-k))
     Posterior mean = (alpha_0+k) / (alpha_0 + beta_0 + n)
     90% credible interval via scipy.stats.beta.ppf
     """
-    PRIOR_ALPHA = 2.0
-    PRIOR_BETA  = 2.0
+    PRIOR_ALPHA = 2.5
+    PRIOR_BETA  = 2.5
     SUPPORT_THRESHOLD = 0.60
     REFUTE_THRESHOLD  = 0.40
     EVIDENCE_CONFIDENCE = 0.90

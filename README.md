@@ -10,6 +10,49 @@ Developer smoke-test / regression guide: [dev_checklist_readme.md](dev_checklist
 
 ---
 
+## Original autoresearch workflow
+
+To understand why Bad PI manipulates `program.md` for coordination, let's first review how the original [autoresearch](https://github.com/karpathy/autoresearch) works.
+
+### Core concept
+Autoresearch is an autonomous experimentation framework where an AI agent iteratively improves a small LLM training setup. The agent modifies code and instructions to achieve better validation bits-per-byte (val_bpb) scores over fixed 5-minute training runs.
+
+### Key files
+- **`prepare.py`**: Fixed constants, data preparation, tokenizer training, and runtime utilities (dataloader, evaluation). **Never modified** by the agent.
+- **`train.py`**: The single file the agent edits. Contains the full GPT model architecture, optimizer (Muon + AdamW), training loop, hyperparameters, batch size, etc. Everything is fair game for modification.
+- **`program.md`**: Baseline instructions and context for the AI agent. This file provides the "research org code" — guidance on what to experiment with, constraints, and objectives. Originally edited manually by humans to set up the autonomous research process.
+
+### Experimentation process
+1. **Setup**: Install dependencies, download data, train tokenizer (one-time via `prepare.py`).
+2. **Manual baseline**: Run `uv run train.py` once to establish a starting val_bpb.
+3. **Agent activation**: Point an AI agent (e.g., Claude, Codex) at `program.md`. The agent reads the instructions and begins autonomous experimentation.
+4. **Iteration loop**:
+   - Agent proposes changes to `train.py` (architecture, hyperparameters, etc.).
+   - Agent modifies `program.md` if needed for better guidance.
+   - Run training for exactly 5 minutes (wall clock).
+   - Evaluate val_bpb; if improved, keep changes; otherwise discard.
+   - Repeat autonomously (potentially 100+ experiments overnight).
+5. **Human oversight**: Review logs, results.tsv, and final model improvements.
+
+### Design principles
+- **Fixed time budget**: All runs are exactly 5 minutes, making results comparable regardless of compute platform or changes made.
+- **Single modification target**: Agent only touches `train.py`, keeping diffs manageable.
+- **Self-contained**: No external dependencies beyond PyTorch; runs on a single GPU.
+- **Metric**: val_bpb (validation bits per byte) — lower is better, vocab-size-independent.
+
+### Why `program.md` manipulation enables better coordination
+In the original single-agent setup, `program.md` is relatively static — it's a human-written charter that guides one agent's behavior. The agent might tweak it slightly, but coordination isn't a concern.
+
+Bad PI extends this to **distributed swarms**:
+- `program.md` becomes a **shared coordination contract** across 1000+ workers.
+- The meta-agent dynamically rewrites `program.md` to reflect current beliefs, hypotheses, and priorities.
+- Workers sync this evolving guidance, ensuring all agents stay aligned on the global research strategy.
+- This transforms `program.md` from a static instruction file into a **live coordination protocol** that adapts based on collective evidence.
+
+Without this capability, distributed autoresearch would devolve into uncoordinated chaos. By controlling `program.md`, Bad PI maintains scientific rigor and accelerates swarm intelligence.
+
+---
+
 ## ⚠️ Critical contract: program.md template (read this first)
 
 Bad PI now assumes a **shared base template** and a **mutable live-update block** in `program.md`.
@@ -54,6 +97,8 @@ so all workers stay aligned while still receiving evolving instructions.
 
 ## System architecture
 
+### Autoresearch + Bad PI workflow
+
 ![Coordination architecture](docs/architecture.svg)
 
 Workers pull a suggested config from Bad PI, run their 5-minute experiment, and push results back. Bad PI aggregates everything and updates the search strategy every 60 seconds. Green arrows carry data upward (results), teal arrows carry directives downward (configs, program.md updates).
@@ -94,13 +139,15 @@ So new LLM hypotheses start cheap, then earn full worker share only after accumu
 
 ### Exact Bayesian update used by the engine
 
-Each hypothesis starts with a mild prior:
+Each hypothesis starts with a slightly stronger prior:
 
 ```json
 {
-  "prior": {"alpha": 2, "beta": 2, "posterior": 0.5}
+  "prior": {"alpha": 2.5, "beta": 2.5, "posterior": 0.5}
 }
 ```
+
+With this prior, a new hypothesis needs about 20 pure wins in a row from 0.5 to reach `P = 0.90`.
 
 Each completed experiment is converted into binary evidence:
 
@@ -119,8 +166,8 @@ Posterior update:
 ```json
 {
   "posterior_update": {
-    "alpha": 2 + wins,
-    "beta": 2 + losses,
+    "alpha": 2.5 + wins,
+    "beta": 2.5 + losses,
     "posterior_mean": "alpha / (alpha + beta)"
   }
 }
@@ -224,9 +271,114 @@ Rejected example:
 
 **Step 3 — Registry add only, no forced allocation**
 
-Accepted proposals are added with a flat Beta(2,2) prior (P=0.5, maximum uncertainty). They are **not** immediately given workers. Allocation is recomputed at the next cycle from `information_value = 4·P·(1−P) × importance × llm_credibility`.
+Accepted proposals are added with a flat Beta(2.5,2.5) prior (P=0.5, maximum uncertainty). They are **not** immediately given workers. With this prior, it takes roughly 20 consecutive wins to reach `P = 0.90`. Allocation is recomputed at the next cycle from `information_value = 4·P·(1−P) × importance × llm_credibility`.
 
 Adding to the registry does **not** guarantee worker allocation. Allocation still depends on the Bayesian evidence and information value.
+
+### Example: LLM-proposed hypothesis and belief update
+
+A simple LLM proposal might look like this:
+
+```json
+{
+  "statement": "learning_rate > 0.001 improves val_bpb when BATCH_SIZE=64",
+  "type": "interaction",
+  "importance": 0.72,
+  "rationale": "Higher learning rates produced better delta_bpb only in the batch_size=64 slice.",
+  "config_constraint": {"BATCH_SIZE": 64},
+  "phase": "exploration",
+  "test_spec": {
+    "type": "single_factor_effect",
+    "variable": "learning_rate",
+    "values": [0.0005, 0.001, 0.002],
+    "min_runs_per_cell": 3,
+    "decision_rule": {"threshold": 0.05}
+  }
+}
+```
+
+If the proposal is novel and valid, the registry accepts it and creates an active hypothesis with:
+
+- `alpha = 2.5`
+- `beta = 2.5`
+- `posterior = 0.50`
+- `llm_credibility = 0.25` (starts low for LLM proposals)
+
+When a worker later submits a result for a run that matches the hypothesis constraint, Bad PI updates the belief:
+
+```json
+{
+  "experiment": {"delta_bpb": -0.008},
+  "outcome": "win"
+}
+```
+
+That update becomes:
+
+```json
+{
+  "posterior_update": {
+    "alpha": 3.5,
+    "beta": 2.5,
+    "posterior_mean": 0.5833
+  }
+}
+```
+
+After two pure wins, the hypothesis would be:
+
+- `alpha = 4.5`
+- `beta = 2.5`
+- `posterior ≈ 0.643`
+
+This belief shift increases the hypothesis's information value, and subsequent worker allocation may rise accordingly.
+
+### Example: worker transition between runs
+
+When a worker finishes one 5-minute run, it asks `/next_config/{worker_id}` for the next experiment. The server responds with a config payload like this:
+
+```json
+{
+  "exp_id": "abc123",
+  "config_delta": {
+    "learning_rate": 0.0018,
+    "BATCH_SIZE": 64,
+    "DEPTH": 12
+  },
+  "hypothesis_id": "h7f4d2",
+  "hypothesis_statement": "learning_rate > 0.001 improves val_bpb when BATCH_SIZE=64",
+  "population_id": "pop_12ab34",
+  "population_strategy": "investigate",
+  "note": "focus on the batch_size=64 learning rate slice",
+  "budget_seconds": 300
+}
+```
+
+The worker patcher applies `config_delta` to the tunable top-level constants in `train.py`. `prepare.py` is not normally modified by Bad PI; it stays as stable utility code. The worker still calls the same training script, but with the new constants inserted.
+
+A worker also pulls the latest program instructions via `/sync/{worker_id}`, which may include a batch-specific `program.md` block such as:
+
+```md
+## Current population: investigate
+- Hypothesis: learning_rate > 0.001 improves val_bpb when BATCH_SIZE=64
+- Keep BATCH_SIZE fixed at 64
+- Sample learning_rate across [0.0005, 0.001, 0.002]
+- Report val_bpb at each 5-minute run
+```
+
+### What changes in `train.py` and `prepare.py`
+
+- `train.py` is the only file Bad PI patches in workers: top-level constants like `learning_rate`, `BATCH_SIZE`, and `DEPTH` are overwritten per run.
+- `prepare.py` is typically unchanged; it provides data loading, tokenizer, and evaluation utilities.
+- Workers receive the config values and program guidance, not a new training script. They run the same `train.py` with patched constants and the current `program.md` instructions.
+
+Now the worker loop is:
+
+1. request next config
+2. patch `train.py` constants from `config_delta`
+3. run the 5-minute experiment
+4. submit `delta_bpb` and progress ticks
+5. receive a new `program.md` / next config for the next run
 
 ---
 

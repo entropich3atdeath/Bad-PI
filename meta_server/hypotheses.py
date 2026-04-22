@@ -21,8 +21,8 @@ from typing import Optional, Any
 import numpy as np
 from scipy import stats
 
-PRIOR_ALPHA = 2.0   # prior "wins"  — mildly uncertain, centered at P=0.5
-PRIOR_BETA  = 2.0   # prior "losses"
+PRIOR_ALPHA = 2.5   # prior "wins"  — slightly stronger, still centered at P=0.5
+PRIOR_BETA  = 2.5   # prior "losses"
 WIN_THRESHOLD = 0.0 # delta_bpb < 0 = improvement = win for hypothesis
 SUPPORT_THRESHOLD = 0.60
 REFUTE_THRESHOLD = 0.40
