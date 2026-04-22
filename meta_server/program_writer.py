@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -34,6 +35,8 @@ IMMUTABLE_START = "<!-- BAD_PI_IMMUTABLE_START -->"
 IMMUTABLE_END = "<!-- BAD_PI_IMMUTABLE_END -->"
 MUTABLE_START = "<!-- BAD_PI_MUTABLE_START -->"
 MUTABLE_END = "<!-- BAD_PI_MUTABLE_END -->"
+ASSIGNMENT_START = "<!-- BAD_PI_ASSIGNMENT_START -->"
+ASSIGNMENT_END = "<!-- BAD_PI_ASSIGNMENT_END -->"
 
 
 def should_write(total_experiments: int, last_written_at: int) -> bool:
@@ -163,6 +166,191 @@ def compose_program_md(base_template: Optional[str], live_update: str) -> str:
         + live_update.strip()
         + "\n"
     )
+
+
+def _assignment_json(data: dict[str, Any]) -> str:
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
+def render_assignment_block(assignment: dict[str, Any]) -> str:
+    return (
+        f"{ASSIGNMENT_START}\n"
+        "```json\n"
+        f"{_assignment_json(assignment)}\n"
+        "```\n"
+        f"{ASSIGNMENT_END}"
+    )
+
+
+def _focus_dims_from_statement(statement: str) -> list[str]:
+    dims: list[str] = []
+    text = str(statement or "").strip()
+    if not text:
+        return dims
+
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+matters\s+for\b", text, flags=re.IGNORECASE)
+    if m:
+        dims.append(m.group(1))
+
+    m2 = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*[x×]\s*([A-Za-z_][A-Za-z0-9_]*)", text)
+    if m2:
+        dims.extend([m2.group(1), m2.group(2)])
+
+    seen: set[str] = set()
+    return [d for d in dims if not (d in seen or seen.add(d))]
+
+
+def _global_strategy(bs: "BeliefState") -> str:
+    if bs.is_converging:
+        return "converge"
+    if bs.is_stalled:
+        return "decision_sprint"
+    return "investigate"
+
+
+def _top_active_dims(bs: "BeliefState", limit: int = 3) -> list[str]:
+    ranked = sorted(
+        [
+            (name, float(stats.get("eta_squared", bs.dimension_importance.get(name, 0.0)) or 0.0))
+            for name, stats in bs.dimension_fstats.items()
+            if name not in bs.frozen_dimensions
+        ],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return [name for name, _ in ranked[:limit]]
+
+
+def build_global_assignment(bs: "BeliefState") -> dict[str, Any]:
+    strategy = _global_strategy(bs)
+    top_hypothesis = bs.hypotheses[0] if bs.hypotheses else {}
+    must_explore = _top_active_dims(bs)
+    if not must_explore and top_hypothesis.get("statement"):
+        must_explore = _focus_dims_from_statement(str(top_hypothesis.get("statement") or ""))
+
+    return {
+        "assignment_id": f"global_n{bs.experiment_count}",
+        "guidance_version": f"program_n{bs.experiment_count}",
+        "population": {
+            "id": "global",
+            "strategy": strategy,
+        },
+        "hypothesis": {
+            "id": top_hypothesis.get("id"),
+            "statement": top_hypothesis.get("statement"),
+        },
+        "budget_seconds": 300,
+        "base_config_delta": dict(bs.best_config_delta or {}),
+        "hard_constraints": {
+            "must_hold_fixed": dict(bs.frozen_dimensions or {}),
+            "must_explore": must_explore,
+            "must_not_change": [
+                "prepare.py",
+                "evaluation harness",
+                "tokenizer/data pipeline",
+            ],
+        },
+        "soft_preferences": {
+            "search_radius": "narrow" if strategy == "converge" else "broad",
+            "repeat_target": 3 if strategy == "decision_sprint" else 2,
+            "prefer_simple_diffs": True,
+        },
+        "reporting": {
+            "priority_metrics": ["val_bpb", "peak_vram_mb", "status"],
+            "failure_labels": ["oom", "timeout", "bug", "other"],
+        },
+    }
+
+
+def build_population_assignment(
+    pop: Any,
+    hypothesis: Any,
+    top_config: Optional[dict[str, Any]] = None,
+    dimensions: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    best_cfg = dict((top_config or {}).get("config_delta") or {})
+    frozen_dims = {
+        d["name"]: d["frozen_value"]
+        for d in (dimensions or [])
+        if bool(d.get("frozen"))
+    }
+    must_hold_fixed = {
+        **frozen_dims,
+        **dict(getattr(hypothesis, "config_constraint", {}) or {}),
+    }
+
+    test_spec = getattr(hypothesis, "test_spec", None) or {}
+    must_explore: list[str] = []
+    if isinstance(test_spec, dict):
+        variable = test_spec.get("variable")
+        if isinstance(variable, str):
+            must_explore.append(variable)
+        must_explore.extend(
+            [v for v in test_spec.get("variables", []) if isinstance(v, str)]
+        )
+    if not must_explore:
+        must_explore = _focus_dims_from_statement(getattr(hypothesis, "statement", ""))
+    seen: set[str] = set()
+    must_explore = [d for d in must_explore if not (d in seen or seen.add(d))]
+
+    strategy = getattr(pop, "strategy", "investigate")
+    search_radius = {
+        "exploit": "narrow",
+        "converge": "narrow",
+        "falsify": "narrow",
+        "validate": "narrow",
+        "decision_sprint": "narrow",
+        "investigate": "broad",
+        "moonshot": "wide",
+    }.get(strategy, "broad")
+    repeat_target = {
+        "validate": 3,
+        "falsify": 3,
+        "decision_sprint": 4,
+        "exploit": 2,
+        "converge": 3,
+        "investigate": 2,
+        "moonshot": 1,
+    }.get(strategy, 2)
+
+    assignment: dict[str, Any] = {
+        "assignment_id": f"{getattr(pop, 'id', 'pop')}:{getattr(hypothesis, 'id', 'hyp')}:n{getattr(hypothesis, 'n_experiments', 0)}",
+        "guidance_version": f"{getattr(pop, 'id', 'pop')}_{strategy}_{getattr(hypothesis, 'n_experiments', 0)}",
+        "population": {
+            "id": getattr(pop, "id", None),
+            "strategy": strategy,
+        },
+        "hypothesis": {
+            "id": getattr(hypothesis, "id", None),
+            "statement": getattr(hypothesis, "statement", None),
+        },
+        "budget_seconds": 300,
+        "base_config_delta": {
+            **best_cfg,
+            **dict(getattr(hypothesis, "config_constraint", {}) or {}),
+        },
+        "hard_constraints": {
+            "must_hold_fixed": must_hold_fixed,
+            "must_explore": must_explore,
+            "must_not_change": [
+                "prepare.py",
+                "evaluation harness",
+                "tokenizer/data pipeline",
+            ],
+        },
+        "soft_preferences": {
+            "search_radius": search_radius,
+            "repeat_target": repeat_target,
+            "prefer_simple_diffs": True,
+        },
+        "reporting": {
+            "priority_metrics": ["val_bpb", "peak_vram_mb", "status"],
+            "failure_labels": ["oom", "timeout", "bug", "other"],
+        },
+    }
+    if test_spec:
+        assignment["test_spec"] = test_spec
+    return assignment
 
 
 # ── Output schemas ─────────────────────────────────────────────────────────────
@@ -315,6 +503,7 @@ def render_program_md(out: ProgramMDOutput, bs: "BeliefState", active_workers: i
         for e in out.hypotheses
     ) or "No hypotheses yet."
 
+    assignment_block = render_assignment_block(build_global_assignment(bs))
     instructions = "\n".join(f"{i+1}. {inst}" for i, inst in enumerate(out.concrete_instructions))
 
     return f"""# program.md — {phase}
@@ -322,6 +511,9 @@ def render_program_md(out: ProgramMDOutput, bs: "BeliefState", active_workers: i
 {warmup_note}{warning_block}
 ## Summary
 {out.phase_summary}
+
+## Assignment
+{assignment_block}
 
 ## Frozen dimensions
 {frozen_block}
@@ -356,14 +548,16 @@ def generate_program_md(bs: "BeliefState", active_workers: int, base_template: O
         return compose_program_md(base_template, live)
 
 
-def propose_new_hypotheses(bs: "BeliefState") -> list[HypothesisProposal]:
+def propose_new_hypotheses(bs: "BeliefState", base_template: Optional[str] = None) -> list[HypothesisProposal]:
     """
     Ask the LLM to propose new hypotheses based on the current BeliefState.
+    Includes the original base program.md when available so the LLM can avoid
+    re-proposing search directions already covered by the charter.
     Returns validated HypothesisProposal objects ready for HypothesisRegistry.
     Falls back to empty list on error — never corrupts belief state.
     """
     try:
-        return _call_hypothesis_tool(bs)
+        return _call_hypothesis_tool(bs, base_template=base_template)
     except Exception as e:
         log.warning(f"hypothesis proposal failed ({type(e).__name__}: {e}) — skipping")
         return []
@@ -526,8 +720,14 @@ def _call_program_md_tool(bs: "BeliefState", base_template: Optional[str] = None
     return out
 
 
-def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
+def _call_hypothesis_tool(bs: "BeliefState", base_template: Optional[str] = None) -> list[HypothesisProposal]:
     context = _build_math_context(bs)
+    base_block = ""
+    if base_template:
+        base_block = (
+            "Original base program.md (charter/context) — use it to avoid repeating already covered directions:\n\n"
+            f"{base_template}\n\n"
+        )
     prompt = (
         "Based on these experiment results, propose 1-3 new hypotheses to test.\n"
         "Base proposals ONLY on patterns visible in the data below.\n"
@@ -537,6 +737,7 @@ def _call_hypothesis_tool(bs: "BeliefState") -> list[HypothesisProposal]:
         "Supported test_spec.type values: single_factor_effect, interaction_grid.\n"
         "For single_factor_effect include {variable, values, min_runs_per_cell, decision_rule:{threshold}}.\n"
         "For interaction_grid include {variables:[a,b], grid:{a:[...],b:[...]}, min_runs_per_cell, decision_rule:{threshold}}.\n\n"
+        f"{base_block}"
         f"{context}\n\n"
         "Produce a JSON object for propose_hypotheses."
     )
@@ -690,10 +891,14 @@ def _template_fallback(bs: "BeliefState", active_workers: int) -> str:
         f"\n> Early stopping DISABLED — warmup ({bs.experiment_count}/{bs.experiment_count + bs.warmup_runs_needed}).\n"
         if not bs.warmup_complete else ""
     )
+    assignment_block = render_assignment_block(build_global_assignment(bs))
 
     return f"""# program.md — {phase} (template)
 *{bs.experiment_count} experiments · {active_workers} workers · kill rate {bs.kill_rate}%*
 {warmup_note}
+## Assignment
+{assignment_block}
+
 ## Frozen dimensions (fANOVA: p>0.10 AND eta²<0.05)
 {chr(10).join(f"- `{k} = {v}`" for k, v in frozen.items()) or "- None yet"}
 

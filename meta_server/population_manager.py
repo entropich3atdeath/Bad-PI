@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .hypotheses import Hypothesis, HypothesisRegistry
+from . import program_writer
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +209,9 @@ class PopulationManager:
         top = top_configs[0] if top_configs else {}
         best_delta = top.get("delta_bpb", "unknown")
         best_cfg   = top.get("config_delta", {})
+        assignment_block = program_writer.render_assignment_block(
+            program_writer.build_population_assignment(pop, hypothesis, top, dimensions)
+        )
 
         strategy_guidance = {
             "exploit": (
@@ -259,6 +263,9 @@ class PopulationManager:
 **Current belief:** P = {hypothesis.posterior:.2f}  (n = {hypothesis.n_experiments} experiments so far)
 **Credible interval (90%):** {hypothesis.credible_interval_90}
 
+## Assignment
+{assignment_block}
+
 ## Strategy
 {strategy_guidance.get(pop.strategy, "Explore freely.")}
 
@@ -306,4 +313,10 @@ Be scientifically precise and actionable.
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],
         )
-        return msg.content[0].text
+        assignment_block = program_writer.render_assignment_block(
+            program_writer.build_population_assignment(pop, hypothesis, top, dimensions)
+        )
+        return (
+            f"## Assignment\n{assignment_block}\n\n"
+            f"{msg.content[0].text}"
+        )

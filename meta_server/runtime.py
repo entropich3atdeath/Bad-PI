@@ -473,7 +473,10 @@ class RuntimeState:
             store.save_program_snapshot(content, total_experiments)
             self.program_update_ready = True
 
-            proposals = program_writer.propose_new_hypotheses(belief_state)
+            proposals = program_writer.propose_new_hypotheses(
+                belief_state,
+                base_template=self.base_program_md,
+            )
             proposal_payloads = [
                 proposal.model_dump() if hasattr(proposal, "model_dump") else proposal.dict()
                 for proposal in proposals

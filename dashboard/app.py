@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import sqlite3
 import time
@@ -186,7 +187,8 @@ def _sample_population_programs(base_url: str) -> tuple[list[dict[str, Any]], st
 _init_state()
 
 st.sidebar.title("Bad PI Dashboard")
-base_url = st.sidebar.text_input("Meta server URL", value="http://localhost:8000").rstrip("/")
+default_base_url = os.environ.get("BAD_PI_META_URL", "http://localhost:8000")
+base_url = st.sidebar.text_input("Meta server URL", value=default_base_url).rstrip("/")
 auto_refresh = st.sidebar.checkbox("Auto-refresh", value=False, key="auto_refresh_enabled")
 refresh_sec = st.sidebar.slider("Refresh interval (seconds)", min_value=2, max_value=60, value=8, step=1)
 if st.sidebar.button("Refresh now"):

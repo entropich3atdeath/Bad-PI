@@ -76,9 +76,20 @@ Your base [program.md](program.md) should include immutable charter text plus th
 <!-- BAD_PI_MUTABLE_END -->
 ```
 
+Bad PI now renders a structured assignment inside that mutable block:
+
+~~~md
+<!-- BAD_PI_ASSIGNMENT_START -->
+```json
+{ ... assignment schema ... }
+```
+<!-- BAD_PI_ASSIGNMENT_END -->
+~~~
+
 Behavior:
 - Everything **outside** the markers is treated as stable charter guidance.
 - Meta-PI rewrites only the mutable block when generating updates.
+- Inside the mutable block, the assignment JSON is the machine-readable coordination contract and the surrounding prose is the human/agent-facing explanation.
 - Workers check for updates every run and apply them only when digest/content changes.
 
 ### Dimension inference cadence (important)
